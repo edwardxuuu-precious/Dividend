@@ -2,7 +2,9 @@ import pytest
 
 from app.models import DividendEvent
 from app.services.history_service import (
+    annual_percentile_rank,
     compute_annual_history,
+    compute_annual_percentiles,
     compute_percentiles,
     forecast_next_year,
     percentile_rank,
@@ -52,6 +54,49 @@ def test_valuation_label():
     assert valuation_label(20) == "偏高估"
     assert valuation_label(5) == "历史性高估"
     assert valuation_label(None) is None
+
+
+# ---------------- Annual-yield Percentiles ----------------
+
+def _annual_series(values_with_year):
+    """生成 [date, close, annual_dividend, annual_yield_pct, annual_year]，只填 yield 与 year。"""
+    return [
+        ["2024-01-01", 1.0, 0.0, ypct, year] for ypct, year in values_with_year
+    ]
+
+
+def test_annual_percentiles_filter_pre_first_period():
+    # year=None 表示 pre_first；样本应被剔除
+    s = (
+        _annual_series([(0.0, None), (0.0, None)])
+        + _annual_series([(1.0, 2020), (2.0, 2021), (3.0, 2022), (4.0, 2023), (5.0, 2024)])
+    )
+    p = compute_annual_percentiles(s)
+    # 仅 5 个有效样本，与 TTM 同算法
+    assert p["p50"] == pytest.approx(3.0)
+    assert p["p10"] == pytest.approx(1.4)
+    assert p["p90"] == pytest.approx(4.6)
+
+
+def test_annual_percentile_rank_independent_from_ttm():
+    """年化样本与 TTM 样本独立——同一 value 在两套样本里可能落在不同分位。"""
+    annual = _annual_series([(2.0, 2022), (3.0, 2023), (4.0, 2024)])
+    ttm = _series([10.0, 11.0, 12.0])
+
+    # 5.0 在年化样本里是历史最高（严格大于所有样本）→ 分位 100；
+    # 在 TTM 样本里全都比它大 → 分位 0
+    assert annual_percentile_rank(5.0, annual) == 100.0
+    assert percentile_rank(5.0, ttm) == 0.0
+    # 同一个 value 在两个样本里给出不同的相对位置，是双口径独立的关键证据
+    assert annual_percentile_rank(3.0, annual) == pytest.approx(33.3, abs=0.1)
+    assert percentile_rank(3.0, ttm) == 0.0
+
+
+def test_annual_percentile_rank_handles_none_and_zero():
+    s = _annual_series([(1.0, 2023), (2.0, 2024)])
+    assert annual_percentile_rank(None, s) is None
+    assert annual_percentile_rank(0, s) is None
+    assert annual_percentile_rank(1.5, []) is None
 
 
 # ---------------- Annual history ----------------

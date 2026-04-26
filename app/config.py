@@ -26,7 +26,12 @@ def load_config(path: Path | str | None = None) -> AppConfig:
     refresh_seconds = int(raw.get("refresh_seconds", 10))
     carry_stale_days = int(raw.get("carry_stale_days", 540))
     stocks = [
-        Stock(symbol=str(item["symbol"]), name=item["name"], exchange=item["exchange"])
+        Stock(
+            symbol=str(item["symbol"]),
+            name=item["name"],
+            exchange=item["exchange"],
+            shares=int(item.get("shares", 0) or 0),
+        )
         for item in raw.get("stocks", [])
     ]
     if not stocks:

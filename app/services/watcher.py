@@ -71,6 +71,14 @@ class WatcherService:
                 yield_pct = round(calc_yield_pct(dividend, price), 4)
 
             pct_info = percentiles.get(stock.symbol)
+            position_value = (
+                round(stock.shares * price, 2) if stock.shares > 0 and price is not None else None
+            )
+            annual_cash = (
+                round(stock.shares * dividend, 2)
+                if stock.shares > 0 and dividend is not None
+                else None
+            )
             rows.append(
                 YieldRow(
                     symbol=stock.symbol,
@@ -83,6 +91,37 @@ class WatcherService:
                     error=error,
                     percentile_rank=pct_info["percentile_rank"] if pct_info else None,
                     valuation=pct_info["valuation"] if pct_info else None,
+                    annual_percentile_rank=(
+                        pct_info.get("annual_percentile_rank") if pct_info else None
+                    ),
+                    annual_valuation=(
+                        pct_info.get("annual_valuation") if pct_info else None
+                    ),
+                    yield_ttm_pct=pct_info.get("yield_ttm_pct") if pct_info else None,
+                    price_ts=quote.ts if quote else None,
+                    shares=stock.shares,
+                    position_value=position_value,
+                    annual_cash=annual_cash,
                 )
             )
         return rows
+
+    def portfolio_summary(self, rows: list[YieldRow]) -> dict | None:
+        """聚合 rows 中带持仓的行：总市值 / 年化分红 / 加权股息率。
+
+        无任何持仓时返回 None；前端用此判断是否显示持仓摘要。
+        """
+        positioned = [r for r in rows if r.shares > 0]
+        if not positioned:
+            return None
+        total_value = round(sum(r.position_value or 0 for r in positioned), 2)
+        total_cash = round(sum(r.annual_cash or 0 for r in positioned), 2)
+        weighted_yield = (
+            round(total_cash / total_value * 100, 2) if total_value > 0 else None
+        )
+        return {
+            "total_value": total_value,
+            "annual_cash": total_cash,
+            "weighted_yield_pct": weighted_yield,
+            "stock_count": len(positioned),
+        }

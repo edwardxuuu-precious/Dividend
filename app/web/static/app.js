@@ -1,21 +1,39 @@
 (function () {
-  const tbody = document.getElementById("yield-tbody");
+  const cardsGrid = document.getElementById("cards-grid");
   const lastUpdated = document.getElementById("last-updated");
   const statusDot = document.getElementById("status-dot");
   const notifyToggle = document.getElementById("notify-toggle");
   let refreshSeconds =
     parseInt(document.querySelector('meta[name="refresh-seconds"]').content, 10) || 10;
 
-  const TABLE_COL_COUNT = 8;
   const NOTIFY_THRESHOLD = 90; // P 分位 ≥ 此值触发通知
   const NOTIFY_PREF_KEY = "dividend-notify-enabled";
-  const expanded = new Map(); // symbol -> { detailRow, abortController }
+  const expanded = new Map(); // symbol -> { detailEl, abortController, liveTimer }
   // 已通知过的 symbol 集合，避免同会话内重复弹窗（每次进入"低估"区只通知 1 次）
   const notifiedAlerts = new Set();
 
   function fmtNumber(v, digits) {
     if (v === null || v === undefined) return "—";
     return Number(v).toFixed(digits);
+  }
+
+  // 千分位金额：12345678.5 → "12,345,678.50"
+  function fmtMoney(v) {
+    if (v === null || v === undefined) return "—";
+    return Number(v).toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  // 紧凑金额：1458.49 → "1,458.49" / 8.323 → "8.32"
+  function fmtPrice(v, digits) {
+    if (v === null || v === undefined) return "—";
+    return Number(v).toLocaleString("zh-CN", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  }
+
+  // ISO 时间戳 → 短格式 "11:46:02"
+  function fmtTime(iso) {
+    if (!iso) return "";
+    const t = iso.split("T")[1];
+    return t ? t.substring(0, 8) : iso;
   }
 
   function yieldClass(pct) {
@@ -26,85 +44,150 @@
     return "";
   }
 
-  function rowKey(row) {
-    return `r-${row.symbol}`;
+  // 行情是否陈旧：price_ts 比 snapshot updated_at 落后超过 1.5×刷新周期
+  // → 这一 tick 没拉到新行情，回退到上次成功值。前端打 ⏱ 水印告知用户。
+  function isPriceStale(row) {
+    if (!row.price_ts || !row.updated_at) return false;
+    const lagSec =
+      (Date.parse(row.updated_at) - Date.parse(row.price_ts)) / 1000;
+    return lagSec > refreshSeconds * 1.5;
   }
 
-  function detailRowKey(symbol) {
-    return `d-${symbol}`;
+  // 卡片"现价"格内 HTML：陈旧时附带 ⏱ HH:MM:SS 水印，鼠标悬停看完整说明
+  function priceCellHtml(row) {
+    if (row.price === null || row.price === undefined) return "¥—";
+    const base = `¥${fmtPrice(row.price, 2)}`;
+    if (!isPriceStale(row)) return base;
+    const t = fmtTime(row.price_ts);
+    return `${base}<span class="stale-tag" title="行情拉取失败，仍显示 ${t} 的实盘价；下次刷新自动恢复">⏱ ${t}</span>`;
   }
 
-  function valuationCellHtml(row) {
-    if (row.percentile_rank === null || row.percentile_rank === undefined) {
-      return '<span class="muted">—</span>';
+  function cardKey(row) { return `c-${row.symbol}`; }
+  function detailKey(symbol) { return `d-${symbol}`; }
+
+  // 单口径徽章。tier="年化" 或 "TTM"；rank/label 对应该口径的分位与估值标签。
+  // 未就绪 → 透明占位，保留布局位避免后续渲染抖动。
+  function singleBadgeHtml(tier, rank, label, tooltip) {
+    if (rank === null || rank === undefined) {
+      return `<span class="badge valuation-neutral val-badge" style="opacity:.4" title="${tooltip}"><span class="val-tier">${tier}</span>—</span>`;
     }
-    const cls = valuationClass(row.valuation);
-    return `<span class="badge ${cls}">P${Math.round(row.percentile_rank)} · ${row.valuation}</span>`;
+    return `<span class="badge ${valuationClass(label)} val-badge" title="${tooltip}"><span class="val-tier">${tier}</span>P${Math.round(rank)} · ${label}</span>`;
   }
 
-  function buildRow(row) {
-    const tr = document.createElement("tr");
-    tr.id = rowKey(row);
-    tr.dataset.symbol = row.symbol;
-    tr.dataset.name = row.name;
-    tr.classList.add("clickable");
+  // 估值徽章组：年化在上、TTM 在下，两套口径并列展示。
+  function valuationBadgeHtml(row) {
+    const annual = singleBadgeHtml(
+      "年化",
+      row.annual_percentile_rank,
+      row.annual_valuation,
+      "年化口径分位：当前年化股息率在历史样本中的位置"
+    );
+    const ttm = singleBadgeHtml(
+      "TTM",
+      row.percentile_rank,
+      row.valuation,
+      "TTM 口径分位：当前 TTM 股息率在历史样本中的位置"
+    );
+    return `<span class="valuation-stack">${annual}${ttm}</span>`;
+  }
+
+  function yieldHtml(row) {
+    if (row.yield_pct === null || row.yield_pct === undefined) {
+      return `<span class="card-yield-error">${row.error || "—"}</span>`;
+    }
+    const ttm = row.yield_ttm_pct;
+    const ttmHtml =
+      ttm === null || ttm === undefined
+        ? '<span class="card-yield-ttm muted">TTM —</span>'
+        : `<span class="card-yield-ttm ${yieldClass(ttm)}" title="TTM = 过去 365 天实际除权金额 ÷ 实时价">TTM ${fmtNumber(ttm, 2)}<span class="unit-sm">%</span></span>`;
+    return `
+      <span class="card-yield-stack">
+        <span class="card-yield ${yieldClass(row.yield_pct)}" title="年化 = 派息年 ${row.dividend_year ?? "—"} 累计每股 ÷ 实时价">${fmtNumber(row.yield_pct, 2)}<span class="unit">%</span><span class="card-yield-tag">年化</span></span>
+        ${ttmHtml}
+      </span>`;
+  }
+
+  function positionHtml(row) {
+    if (!row.shares || row.shares <= 0) return "";
+    return `
+      <div class="card-position" data-field="position">
+        <div><span class="card-position-label">${row.shares.toLocaleString("zh-CN")} 股</span></div>
+        <div><span class="card-position-label">市值</span><span class="card-position-value">¥${fmtMoney(row.position_value)}</span></div>
+        <div><span class="card-position-label">年化</span><span class="card-position-value good">¥${fmtMoney(row.annual_cash)}</span></div>
+      </div>`;
+  }
+
+  function buildCard(row) {
+    const card = document.createElement("article");
+    card.id = cardKey(row);
+    card.dataset.symbol = row.symbol;
+    card.classList.add("card");
     if (row.error && row.price === null && row.dividend === null) {
-      tr.classList.add("row-error");
+      card.classList.add("error");
     }
-    tr.innerHTML = `
-      <td>${row.symbol}</td>
-      <td>${row.name}</td>
-      <td class="num" data-field="price">${fmtNumber(row.price, 2)}</td>
-      <td class="num" data-field="dividend">${fmtNumber(row.dividend, 4)}</td>
-      <td data-field="year">${row.dividend_year ?? "—"}</td>
-      <td class="num ${yieldClass(row.yield_pct)}" data-field="yield">${
-      row.yield_pct === null || row.yield_pct === undefined
-        ? row.error || "—"
-        : fmtNumber(row.yield_pct, 2) + "%"
-    }</td>
-      <td data-field="valuation">${valuationCellHtml(row)}</td>
-      <td>${row.updated_at}</td>
+    card.innerHTML = `
+      <div class="card-head">
+        <div class="card-name">${row.name}</div>
+        <div class="card-symbol">${row.symbol}</div>
+      </div>
+      <div class="card-headline">
+        <div data-field="yield">${yieldHtml(row)}</div>
+        <div data-field="valuation">${valuationBadgeHtml(row)}</div>
+      </div>
+      <div class="card-facts">
+        <div class="card-fact"><span>现价</span><b data-field="price">${priceCellHtml(row)}</b></div>
+        <div class="card-fact"><span>每股</span><b data-field="dividend">¥${fmtPrice(row.dividend, 4)}</b></div>
+        <div class="card-fact"><span>派息年</span><b data-field="year">${row.dividend_year ?? "—"}</b></div>
+      </div>
+      ${positionHtml(row)}
+      <div class="card-time" data-field="time">${fmtTime(row.updated_at)}</div>
     `;
-    tr.addEventListener("click", () => toggleDetail(row.symbol, row.name));
-    return tr;
+    card.addEventListener("click", () => toggleDetail(row.symbol, row.name));
+    return card;
   }
 
-  function updateRow(tr, row) {
-    const map = {
-      price: fmtNumber(row.price, 2),
-      dividend: fmtNumber(row.dividend, 4),
-      year: row.dividend_year ?? "—",
-      yield:
-        row.yield_pct === null || row.yield_pct === undefined
-          ? row.error || "—"
-          : fmtNumber(row.yield_pct, 2) + "%",
-    };
+  function updateCard(card, row) {
     let changed = false;
-    for (const [field, value] of Object.entries(map)) {
-      const cell = tr.querySelector(`[data-field="${field}"]`);
-      if (!cell) continue;
-      if (cell.textContent !== String(value)) {
-        cell.textContent = value;
+    const setHtml = (selector, html) => {
+      const el = card.querySelector(selector);
+      if (el && el.innerHTML !== html) {
+        el.innerHTML = html;
         changed = true;
       }
-      if (field === "yield") {
-        cell.className = "num " + yieldClass(row.yield_pct);
-      }
-    }
-    // 估值列单独处理（含 HTML，不能用 textContent 比对）
-    const valuationCell = tr.querySelector('[data-field="valuation"]');
-    if (valuationCell) {
-      const newHtml = valuationCellHtml(row);
-      if (valuationCell.innerHTML !== newHtml) {
-        valuationCell.innerHTML = newHtml;
+    };
+    const setText = (selector, text) => {
+      const el = card.querySelector(selector);
+      if (el && el.textContent !== String(text)) {
+        el.textContent = text;
         changed = true;
       }
+    };
+
+    setHtml('[data-field="yield"]', yieldHtml(row));
+    setHtml('[data-field="valuation"]', valuationBadgeHtml(row));
+    setHtml('[data-field="price"]', priceCellHtml(row));
+    setText('[data-field="dividend"]', "¥" + fmtPrice(row.dividend, 4));
+    setText('[data-field="year"]', row.dividend_year ?? "—");
+    setText('[data-field="time"]', fmtTime(row.updated_at));
+
+    // 持仓块需要整体替换（内含多元素）
+    const existingPos = card.querySelector('[data-field="position"]');
+    const newPos = positionHtml(row);
+    if (existingPos && !newPos) {
+      existingPos.remove();
+      changed = true;
+    } else if (!existingPos && newPos) {
+      card.querySelector(".card-time").insertAdjacentHTML("beforebegin", newPos);
+      changed = true;
+    } else if (existingPos && newPos && existingPos.outerHTML !== newPos) {
+      existingPos.outerHTML = newPos;
+      changed = true;
     }
-    tr.querySelector("td:last-child").textContent = row.updated_at;
+
     if (changed) {
-      tr.classList.remove("flash");
-      void tr.offsetWidth;
-      tr.classList.add("flash");
+      card.classList.remove("flash");
+      void card.offsetWidth;
+      card.classList.add("flash");
     }
   }
 
@@ -118,7 +201,6 @@
   function compareRows(a, b) {
     const av = a[sortKey];
     const bv = b[sortKey];
-    // null/undefined 永远排末尾
     const aNull = av === null || av === undefined;
     const bNull = bv === null || bv === undefined;
     if (aNull && bNull) return 0;
@@ -130,17 +212,16 @@
     return sortDesc ? bv - av : av - bv;
   }
 
-  function setupSortHeaders() {
-    const headers = document.querySelectorAll("#yield-table th[data-sort]");
-    headers.forEach((th) => {
-      th.classList.add("sortable");
-      th.addEventListener("click", () => {
-        const key = th.dataset.sort;
+  function setupSortToolbar() {
+    const pills = document.querySelectorAll("#sort-bar .sort-pill");
+    pills.forEach((pill) => {
+      pill.addEventListener("click", () => {
+        const key = pill.dataset.sort;
         if (sortKey === key) {
           sortDesc = !sortDesc;
         } else {
           sortKey = key;
-          // 文本列默认升序，数字/年度列默认降序
+          // 文本列默认升序，数字/年度默认降序
           sortDesc = !["symbol", "name"].includes(key);
         }
         updateSortIndicators();
@@ -151,33 +232,34 @@
   }
 
   function updateSortIndicators() {
-    document.querySelectorAll("#yield-table th[data-sort]").forEach((th) => {
-      th.classList.remove("sort-asc", "sort-desc");
-      if (th.dataset.sort === sortKey) {
-        th.classList.add(sortDesc ? "sort-desc" : "sort-asc");
-      }
+    document.querySelectorAll("#sort-bar .sort-pill").forEach((pill) => {
+      const isActive = pill.dataset.sort === sortKey;
+      pill.classList.toggle("active", isActive);
+      pill.classList.toggle("sort-asc", isActive && !sortDesc);
     });
   }
 
   function render(rows) {
     lastRows = rows;
     const sorted = [...rows].sort(compareRows);
+    // 创建/更新卡片
     sorted.forEach((row) => {
-      const existing = document.getElementById(rowKey(row));
+      const existing = document.getElementById(cardKey(row));
       if (existing) {
-        updateRow(existing, row);
+        updateCard(existing, row);
       } else {
-        if (tbody.querySelector(".loading")) tbody.innerHTML = "";
-        tbody.appendChild(buildRow(row));
+        const loading = cardsGrid.querySelector(".cards-loading");
+        if (loading) loading.remove();
+        cardsGrid.appendChild(buildCard(row));
       }
     });
-    // 重排 DOM 到当前排序顺序，detail row 跟随其父 row
+    // 重排 DOM：每张卡片后跟随其 detail（如已展开）
     sorted.forEach((row) => {
-      const tr = document.getElementById(rowKey(row));
-      if (!tr) return;
-      tbody.appendChild(tr);
-      const detailTr = document.getElementById(detailRowKey(row.symbol));
-      if (detailTr) tbody.appendChild(detailTr);
+      const card = document.getElementById(cardKey(row));
+      if (!card) return;
+      cardsGrid.appendChild(card);
+      const detailEl = document.getElementById(detailKey(row.symbol));
+      if (detailEl) cardsGrid.appendChild(detailEl);
     });
   }
 
@@ -188,39 +270,53 @@
       const ctx = expanded.get(symbol);
       ctx.abortController.abort();
       if (ctx.liveTimer) clearInterval(ctx.liveTimer);
-      ctx.detailRow.remove();
+      ctx.detailEl.remove();
       expanded.delete(symbol);
-      const mainRow = document.getElementById(`r-${symbol}`);
-      if (mainRow) mainRow.classList.remove("expanded");
+      const card = document.getElementById(cardKey({ symbol }));
+      if (card) card.classList.remove("expanded");
       return;
     }
 
-    const mainRow = document.getElementById(`r-${symbol}`);
-    if (!mainRow) return;
-    mainRow.classList.add("expanded");
+    const card = document.getElementById(cardKey({ symbol }));
+    if (!card) return;
+    card.classList.add("expanded");
 
-    const detailRow = document.createElement("tr");
-    detailRow.id = detailRowKey(symbol);
-    detailRow.classList.add("detail-row");
-    const cell = document.createElement("td");
-    cell.colSpan = TABLE_COL_COUNT;
-    cell.innerHTML = `
+    const detailEl = document.createElement("div");
+    detailEl.id = detailKey(symbol);
+    detailEl.classList.add("card-detail");
+    detailEl.innerHTML = `
       <div class="detail-panel">
         <div class="summary-card">
           <div class="summary-left">
             <div class="summary-stock">${name} <span class="muted">${symbol}</span></div>
-            <div class="summary-yield">
-              <span class="big-yield">—</span>
-              <span class="big-suffix">%</span>
-              <span class="valuation-badge"></span>
-              <span class="lapsed-badge"></span>
+            <div class="summary-dual-yield">
+              <div class="dual-yield-block">
+                <div class="dual-yield-label">年化 <span class="muted dual-yield-year"></span></div>
+                <div class="dual-yield-value">
+                  <span class="big-yield big-yield-annual">—</span><span class="big-suffix">%</span>
+                </div>
+                <div class="dual-yield-basis muted"></div>
+                <div class="dual-yield-badge"><span class="valuation-badge-annual"></span></div>
+              </div>
+              <div class="dual-yield-divider"></div>
+              <div class="dual-yield-block">
+                <div class="dual-yield-label">TTM <span class="muted">（365 天滚动）</span></div>
+                <div class="dual-yield-value">
+                  <span class="big-yield big-yield-ttm">—</span><span class="big-suffix">%</span>
+                </div>
+                <div class="dual-yield-basis muted"></div>
+                <div class="dual-yield-badge"><span class="valuation-badge-ttm"></span></div>
+              </div>
+              <div class="dual-yield-tags">
+                <span class="lapsed-badge"></span>
+              </div>
             </div>
             <div class="summary-meta muted"></div>
           </div>
         </div>
 
         <section class="chart-section">
-          <h3 class="section-title">TTM 股息率走势 <span class="muted">(过去 12 个月分红 / 当日收盘价)</span></h3>
+          <h3 class="section-title">股息率走势 <span class="muted">(双口径：TTM 365 天滚动 vs 年化派息年累计 / 当日收盘价)</span></h3>
           <div class="chart-wrap"><div class="chart-loading">加载历史数据…</div></div>
         </section>
 
@@ -234,11 +330,10 @@
         </section>
       </div>
     `;
-    detailRow.appendChild(cell);
-    mainRow.parentNode.insertBefore(detailRow, mainRow.nextSibling);
+    card.parentNode.insertBefore(detailEl, card.nextSibling);
 
     const ac = new AbortController();
-    const ctx = { detailRow, abortController: ac, liveTimer: null };
+    const ctx = { detailEl, abortController: ac, liveTimer: null };
     expanded.set(symbol, ctx);
 
     fetch(`/api/yields/${symbol}/history`, { signal: ac.signal, cache: "no-store" })
@@ -248,7 +343,6 @@
       })
       .then((data) => {
         renderDetail(ctx, data);
-        // 启动盘中实时轮询：每 refreshSeconds 秒拉一次 /current 更新摘要与 live dot
         ctx.liveTimer = setInterval(
           () => pollLiveCurrent(symbol, ctx),
           refreshSeconds * 1000
@@ -256,7 +350,7 @@
       })
       .catch((e) => {
         if (e.name === "AbortError") return;
-        const wrap = detailRow.querySelector(".chart-wrap");
+        const wrap = detailEl.querySelector(".chart-wrap");
         wrap.innerHTML = `<div class="chart-error">加载失败：${e.message}</div>`;
       });
   }
@@ -278,22 +372,50 @@
 
   function applyLiveCurrent(ctx, current) {
     if (!current) return;
-    const dr = ctx.detailRow;
+    const dr = ctx.detailEl;
+    if (!dr) return;
 
-    // 摘要大字
-    const yieldEl = dr.querySelector(".big-yield");
-    if (yieldEl && current.yield_pct !== null && current.yield_pct !== undefined) {
-      yieldEl.textContent = fmtNumber(current.yield_pct, 2);
-      yieldEl.className = "big-yield " + yieldClass(current.yield_pct);
+    // 双口径大字
+    const annualEl = dr.querySelector(".big-yield-annual");
+    if (annualEl && current.annual_yield_pct !== null && current.annual_yield_pct !== undefined) {
+      annualEl.textContent = fmtNumber(current.annual_yield_pct, 2);
+      annualEl.className = "big-yield big-yield-annual " + yieldClass(current.annual_yield_pct);
+    }
+    const ttmEl = dr.querySelector(".big-yield-ttm");
+    if (ttmEl && current.yield_pct !== null && current.yield_pct !== undefined) {
+      ttmEl.textContent = fmtNumber(current.yield_pct, 2);
+      ttmEl.className = "big-yield big-yield-ttm " + yieldClass(current.yield_pct);
     }
 
-    // 估值徽章
-    const badge = dr.querySelector(".valuation-badge");
-    if (badge && current.percentile_rank !== null && current.percentile_rank !== undefined) {
-      badge.textContent = `P${current.percentile_rank.toFixed(0)} · ${current.valuation}`;
-      badge.className = "valuation-badge badge " + valuationClass(current.valuation);
-      badge.style.display = "";
+    // 双口径分子说明
+    const blocks = dr.querySelectorAll(".dual-yield-block");
+    if (blocks.length >= 2 && current.live_price && current.live_price > 0) {
+      const annualBasis = blocks[0].querySelector(".dual-yield-basis");
+      if (annualBasis && current.annual_dividend !== null && current.annual_dividend !== undefined) {
+        annualBasis.textContent = `每股 ¥${fmtNumber(current.annual_dividend, 4)} ÷ ¥${fmtNumber(current.live_price, 2)}`;
+      }
+      const yearLbl = blocks[0].querySelector(".dual-yield-year");
+      if (yearLbl) yearLbl.textContent = current.annual_year ? `（派息年 ${current.annual_year}）` : "";
+
+      const ttmBasis = blocks[1].querySelector(".dual-yield-basis");
+      if (ttmBasis && current.ttm_dividend !== null && current.ttm_dividend !== undefined) {
+        ttmBasis.textContent = `近 365 天 ¥${fmtNumber(current.ttm_dividend, 4)} ÷ ¥${fmtNumber(current.live_price, 2)}`;
+      }
     }
+
+    // 估值徽章（双口径：年化挂在年化块、TTM 挂在 TTM 块）
+    setBadge(
+      dr.querySelector(".valuation-badge-annual"),
+      "valuation-badge-annual",
+      current.annual_percentile_rank,
+      current.annual_valuation
+    );
+    setBadge(
+      dr.querySelector(".valuation-badge-ttm"),
+      "valuation-badge-ttm",
+      current.percentile_rank,
+      current.valuation
+    );
 
     // summary-meta 里的"当前价"
     const meta = dr.querySelector(".summary-meta");
@@ -314,6 +436,20 @@
         current.live_price
       );
     }
+  }
+
+  // 把单口径分位/估值写入指定 .valuation-badge-* span。
+  // 缺数据时隐藏；与 valuationClass 一致地维护颜色 class。
+  function setBadge(el, baseClass, rank, label) {
+    if (!el) return;
+    if (rank === null || rank === undefined) {
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.textContent = `P${rank.toFixed(0)} · ${label}`;
+    el.className = `${baseClass} badge ` + valuationClass(label);
+    el.style.display = "";
   }
 
   function renderLapsedBadge(summary) {
@@ -343,8 +479,9 @@
   }
 
   function renderDetail(ctx, data) {
-    const detailRow = ctx.detailRow;
+    const detailRow = ctx.detailEl;  // 沿用旧名，所有 detailRow.querySelector 的逻辑不变
     const series = data.series || [];
+    const annualSeries = data.annual_series || [];
     const events = data.events || [];
     const percentiles = data.percentiles || {};
     const current = data.current || {};
@@ -362,19 +499,48 @@
 
     // ---------- 顶部摘要卡（用 current 而非 series 末端，反映实时） ----------
     {
-      const yieldEl = detailRow.querySelector(".big-yield");
-      const badge = detailRow.querySelector(".valuation-badge");
-      const liveYield = current.yield_pct;
-      if (liveYield !== null && liveYield !== undefined) {
-        yieldEl.textContent = fmtNumber(liveYield, 2);
-        yieldEl.className = "big-yield " + yieldClass(liveYield);
+      const annualEl = detailRow.querySelector(".big-yield-annual");
+      const ttmEl = detailRow.querySelector(".big-yield-ttm");
+
+      const liveAnnual = current.annual_yield_pct;
+      if (annualEl && liveAnnual !== null && liveAnnual !== undefined) {
+        annualEl.textContent = fmtNumber(liveAnnual, 2);
+        annualEl.className = "big-yield big-yield-annual " + yieldClass(liveAnnual);
       }
-      if (current.percentile_rank !== null && current.percentile_rank !== undefined) {
-        badge.textContent = `P${current.percentile_rank.toFixed(0)} · ${current.valuation}`;
-        badge.className = "valuation-badge badge " + valuationClass(current.valuation);
-      } else {
-        badge.style.display = "none";
+      const liveTtm = current.yield_pct;
+      if (ttmEl && liveTtm !== null && liveTtm !== undefined) {
+        ttmEl.textContent = fmtNumber(liveTtm, 2);
+        ttmEl.className = "big-yield big-yield-ttm " + yieldClass(liveTtm);
       }
+
+      const blocks = detailRow.querySelectorAll(".dual-yield-block");
+      if (blocks.length >= 2 && current.live_price && current.live_price > 0) {
+        const annualBasis = blocks[0].querySelector(".dual-yield-basis");
+        if (annualBasis && current.annual_dividend !== null && current.annual_dividend !== undefined) {
+          annualBasis.textContent = `每股 ¥${fmtNumber(current.annual_dividend, 4)} ÷ ¥${fmtNumber(current.live_price, 2)}`;
+        }
+        const yearLbl = blocks[0].querySelector(".dual-yield-year");
+        if (yearLbl) yearLbl.textContent = current.annual_year ? `（派息年 ${current.annual_year}）` : "";
+
+        const ttmBasis = blocks[1].querySelector(".dual-yield-basis");
+        if (ttmBasis && current.ttm_dividend !== null && current.ttm_dividend !== undefined) {
+          ttmBasis.textContent = `近 365 天 ¥${fmtNumber(current.ttm_dividend, 4)} ÷ ¥${fmtNumber(current.live_price, 2)}`;
+        }
+      }
+
+      // 双口径估值徽章：年化挂在年化块、TTM 挂在 TTM 块
+      setBadge(
+        detailRow.querySelector(".valuation-badge-annual"),
+        "valuation-badge-annual",
+        current.annual_percentile_rank,
+        current.annual_valuation
+      );
+      setBadge(
+        detailRow.querySelector(".valuation-badge-ttm"),
+        "valuation-badge-ttm",
+        current.percentile_rank,
+        current.valuation
+      );
 
       const max = yields.length ? Math.max(...yields) : null;
       const min = yields.length ? Math.min(...yields) : null;
@@ -383,7 +549,7 @@
         current.source === "live" ? "" : '<span class="live-source">（昨收）</span>';
       detailRow.querySelector(".summary-meta").innerHTML = `
         当前价 <b class="live-price">${fmtNumber(current.live_price, 2)}</b>${liveSource} ·
-        历史最高 ${fmtNumber(max, 2)}% (${maxDate}) ·
+        TTM 历史最高 ${fmtNumber(max, 2)}% (${maxDate}) ·
         最低 ${fmtNumber(min, 2)}% ·
         共 ${series.length.toLocaleString()} 个交易日
       `;
@@ -393,11 +559,11 @@
       lapsedEl.style.display = lapsedEl.innerHTML ? "" : "none";
     }
 
-    // ---------- 折线图（含 EOD 蓝点） ----------
+    // ---------- 折线图（双线：TTM + 年化，含双 EOD 点） ----------
     const chartWrap = detailRow.querySelector(".chart-wrap");
     chartWrap.innerHTML = "";
     if (series.length > 0) {
-      chartWrap.appendChild(buildChart(series, percentiles).element);
+      chartWrap.appendChild(buildChart(series, percentiles, annualSeries).element);
     } else {
       chartWrap.innerHTML = `<div class="chart-error">没有历史数据</div>`;
     }
@@ -533,13 +699,20 @@
     );
   }
 
-  function buildChart(series, percentiles = {}) {
+  function buildChart(series, percentiles = {}, annualSeries = []) {
     // 剔除 lapsed / pre_first（视为图上的断点），保留 window + carry
     const allPoints = series.filter((p) => {
       if (p[3] === null) return false;
       const src = sourceOf(p);
       return src === "window" || src === "carry";
     });
+    // 年化：剔除 yield_pct = null/0（pre_first 期）的点
+    const annualPoints = annualSeries.filter(
+      (p) => p[3] !== null && p[3] !== undefined && p[3] > 0
+    );
+    // 同日索引：tooltip 锚定 TTM 日期后能立刻查到对应年化点
+    const annualByDate = new Map(annualPoints.map((p) => [p[0], p]));
+
     if (!allPoints.length) {
       const empty = document.createElement("div");
       empty.className = "chart-error";
@@ -550,7 +723,7 @@
     const fullT0 = Date.parse(allPoints[0][0]);
     const fullT1 = Date.parse(allPoints[allPoints.length - 1][0]);
 
-    // 外壳（按钮栏 + SVG 槽 + tooltip）
+    // 外壳（按钮栏 + 图例 + SVG 槽 + tooltip）
     const wrap = document.createElement("div");
     wrap.className = "chart-container";
 
@@ -570,6 +743,15 @@
     zoomHint.className = "chart-zoom-hint muted";
     zoomHint.textContent = "拖选区间放大";
     bar.appendChild(zoomHint);
+
+    // 双口径图例
+    const legend = document.createElement("span");
+    legend.className = "chart-legend";
+    legend.innerHTML = `
+      <span class="legend-item"><span class="legend-swatch legend-ttm"></span>TTM 365 天滚动</span>
+      <span class="legend-item"><span class="legend-swatch legend-annual"></span>年化派息年累计</span>
+    `;
+    bar.appendChild(legend);
 
     const resetBtn = document.createElement("button");
     resetBtn.type = "button";
@@ -623,6 +805,8 @@
         tooltip,
         wrapEl: wrap,
         allPoints,
+        annualPoints,
+        annualByDate,
         percentiles,
         viewT0,
         viewT1,
@@ -640,6 +824,8 @@
     tooltip,
     wrapEl,
     allPoints,
+    annualPoints = [],
+    annualByDate = new Map(),
     percentiles,
     viewT0,
     viewT1,
@@ -659,6 +845,10 @@
       const t = Date.parse(p[0]);
       return t >= viewT0 && t <= viewT1;
     });
+    const annualVisible = annualPoints.filter((p) => {
+      const t = Date.parse(p[0]);
+      return t >= viewT0 && t <= viewT1;
+    });
 
     if (!points.length) {
       const msg = document.createElement("div");
@@ -668,14 +858,17 @@
       return;
     }
 
-    const seriesMax = Math.max(...points.map((p) => p[3]));
+    const ttmMax = Math.max(...points.map((p) => p[3]));
+    const annualMax = annualVisible.length
+      ? Math.max(...annualVisible.map((p) => p[3]))
+      : 0;
     const pctMax = Math.max(
       ...["p10", "p25", "p50", "p75", "p90"]
         .map((k) => percentiles[k])
         .filter((v) => v !== null && v !== undefined),
       0
     );
-    const yMax = Math.max(seriesMax, pctMax) * 1.1 || 1;
+    const yMax = Math.max(ttmMax, annualMax, pctMax) * 1.1 || 1;
     const yMin = 0;
 
     const xOf = (dStrOrTime) => {
@@ -795,7 +988,15 @@
       svg.appendChild(p);
     });
 
-    // EOD / Live —— 仅在 EOD 在可见窗口内时绘制
+    // 年化曲线（紫色实线，从 annualVisible 一次性画出）
+    if (annualVisible.length >= 2) {
+      const annualPath = document.createElementNS(svgNS, "path");
+      annualPath.setAttribute("d", pathD(annualVisible));
+      annualPath.setAttribute("class", "chart-line-annual");
+      svg.appendChild(annualPath);
+    }
+
+    // EOD / Live —— 仅在 EOD 在可见窗口内时绘制（TTM 蓝点 + 年化紫点）
     const lastFullPoint = allPoints[allPoints.length - 1];
     const eodT = Date.parse(lastFullPoint[0]);
     if (eodT >= viewT0 && eodT <= viewT1) {
@@ -805,17 +1006,35 @@
       eodDot.setAttribute("r", 3.5);
       eodDot.setAttribute("class", "chart-eod-dot");
       eodDot.appendChild(
-        _svgTitle(`昨收 ${lastFullPoint[0]}\n股息率 ${lastFullPoint[3].toFixed(2)}%`)
+        _svgTitle(`昨收 ${lastFullPoint[0]}\nTTM 股息率 ${lastFullPoint[3].toFixed(2)}%`)
       );
       svg.appendChild(eodDot);
     }
+    if (annualVisible.length) {
+      const lastAnnual = annualVisible[annualVisible.length - 1];
+      const annualDot = document.createElementNS(svgNS, "circle");
+      annualDot.setAttribute("cx", xOf(lastAnnual[0]));
+      annualDot.setAttribute("cy", yOf(lastAnnual[3]));
+      annualDot.setAttribute("r", 3.5);
+      annualDot.setAttribute("class", "chart-eod-dot-annual");
+      annualDot.appendChild(
+        _svgTitle(`昨收 ${lastAnnual[0]}\n年化股息率 ${lastAnnual[3].toFixed(2)}%`)
+      );
+      svg.appendChild(annualDot);
+    }
 
-    // 悬浮元素
+    // 悬浮元素（双圆点：TTM + 年化）
     const hoverDot = document.createElementNS(svgNS, "circle");
     hoverDot.setAttribute("r", 4);
     hoverDot.setAttribute("class", "chart-hover-dot");
     hoverDot.style.display = "none";
     svg.appendChild(hoverDot);
+
+    const hoverDotAnnual = document.createElementNS(svgNS, "circle");
+    hoverDotAnnual.setAttribute("r", 4);
+    hoverDotAnnual.setAttribute("class", "chart-hover-dot-annual");
+    hoverDotAnnual.style.display = "none";
+    svg.appendChild(hoverDotAnnual);
 
     const hoverLine = document.createElementNS(svgNS, "line");
     hoverLine.setAttribute("class", "chart-hover-line");
@@ -859,6 +1078,7 @@
       brushRect.setAttribute("width", 0);
       brushRect.style.display = "";
       hoverDot.style.display = "none";
+      hoverDotAnnual.style.display = "none";
       hoverLine.style.display = "none";
       tooltip.style.display = "none";
       ev.preventDefault();
@@ -891,15 +1111,41 @@
       hoverLine.setAttribute("x1", px);
       hoverLine.setAttribute("x2", px);
       hoverLine.style.display = "";
+
+      // 同日年化点：用日期 string 索引，避免双 series 长度对不齐时错位
+      const ap = annualByDate.get(p[0]);
+      let annualLine = "";
+      if (ap && ap[3] !== null && ap[3] !== undefined && ap[3] > 0) {
+        const apy = yOf(ap[3]);
+        hoverDotAnnual.setAttribute("cx", px);
+        hoverDotAnnual.setAttribute("cy", apy);
+        hoverDotAnnual.style.display = "";
+        const yearTag = ap[4] ? ` <span class="muted">(${ap[4]} 年)</span>` : "";
+        annualLine = `
+          <div class="tt-row">
+            <span class="legend-swatch legend-annual"></span>
+            年化${yearTag}
+            <b class="${yieldClass(ap[3])}" style="margin-left:6px">${fmtNumber(ap[3], 2)}%</b>
+            <span class="muted" style="margin-left:6px">每股 ${fmtNumber(ap[2], 4)}</span>
+          </div>`;
+      } else {
+        hoverDotAnnual.style.display = "none";
+      }
+
       const srcLabel = sourceLabel(sourceOf(p));
       const srcLine = srcLabel
         ? `<div class="muted">${srcLabel}</div>`
         : "";
       tooltip.innerHTML = `
-        <div>${p[0]}</div>
-        <div>价 <b>${fmtNumber(p[1], 2)}</b></div>
-        <div>TTM 分红 <b>${fmtNumber(p[2], 4)}</b></div>
-        <div>股息率 <b class="${yieldClass(p[3])}">${fmtNumber(p[3], 2)}%</b></div>
+        <div class="tt-date">${p[0]}</div>
+        <div class="tt-row"><span class="muted">价</span> <b>${fmtNumber(p[1], 2)}</b></div>
+        <div class="tt-row">
+          <span class="legend-swatch legend-ttm"></span>
+          TTM
+          <b class="${yieldClass(p[3])}" style="margin-left:6px">${fmtNumber(p[3], 2)}%</b>
+          <span class="muted" style="margin-left:6px">近 365 天 ${fmtNumber(p[2], 4)}</span>
+        </div>
+        ${annualLine}
         ${srcLine}
       `;
       tooltip.style.display = "";
@@ -928,6 +1174,7 @@
         brushRect.style.display = "none";
       }
       hoverDot.style.display = "none";
+      hoverDotAnnual.style.display = "none";
       hoverLine.style.display = "none";
       tooltip.style.display = "none";
     });
@@ -983,6 +1230,29 @@
     return el;
   }
 
+  // -------------------- 持仓摘要条 --------------------
+  // 卡片布局下每张卡片自己的 .card-position 块负责显示 per-stock 持仓；
+  // 这里只管顶部的总览条。
+
+  function renderPortfolio(portfolio) {
+    const bar = document.getElementById("portfolio-bar");
+    if (!portfolio) {
+      bar.style.display = "none";
+      return;
+    }
+    bar.style.display = "";
+    document.getElementById("portfolio-value").textContent =
+      "¥ " + fmtMoney(portfolio.total_value);
+    document.getElementById("portfolio-cash").textContent =
+      "¥ " + fmtMoney(portfolio.annual_cash);
+    document.getElementById("portfolio-yield").textContent =
+      portfolio.weighted_yield_pct !== null
+        ? portfolio.weighted_yield_pct.toFixed(2) + "%"
+        : "—";
+    document.getElementById("portfolio-count").textContent =
+      String(portfolio.stock_count);
+  }
+
   // -------------------- 主刷新循环 --------------------
 
   async function tick() {
@@ -992,6 +1262,7 @@
       const data = await resp.json();
       if (data.refresh_seconds) refreshSeconds = data.refresh_seconds;
       render(data.rows);
+      renderPortfolio(data.portfolio);
       maybeNotify(data.rows);
       lastUpdated.textContent = "上次刷新 " + new Date().toLocaleTimeString();
       statusDot.className = "dot ok";
@@ -1019,7 +1290,7 @@
       return;
     }
     const on = notifyEnabled();
-    notifyToggle.textContent = on ? "通知：开" : "通知：关";
+    notifyToggle.textContent = on ? "通知 开" : "通知 关";
     notifyToggle.classList.toggle("notify-on", on);
   }
 
@@ -1049,19 +1320,34 @@
   function maybeNotify(rows) {
     if (!notifyEnabled()) return;
     rows.forEach((row) => {
-      const isAlert =
+      // 任一口径达到阈值即视为触发；body 同时列出双口径的分位
+      const annualHit =
+        row.annual_percentile_rank !== null &&
+        row.annual_percentile_rank !== undefined &&
+        row.annual_percentile_rank >= NOTIFY_THRESHOLD;
+      const ttmHit =
         row.percentile_rank !== null &&
         row.percentile_rank !== undefined &&
         row.percentile_rank >= NOTIFY_THRESHOLD;
+      const isAlert = annualHit || ttmHit;
       if (!isAlert) {
         notifiedAlerts.delete(row.symbol); // 跌出阈值，下次再进可以重新通知
         return;
       }
       if (notifiedAlerts.has(row.symbol)) return;
       notifiedAlerts.add(row.symbol);
+      const annualPart =
+        row.annual_percentile_rank !== null && row.annual_percentile_rank !== undefined
+          ? `年化 ${row.yield_pct?.toFixed(2)}% · P${Math.round(row.annual_percentile_rank)} ${row.annual_valuation || ""}`
+          : null;
+      const ttmPart =
+        row.percentile_rank !== null && row.percentile_rank !== undefined
+          ? `TTM ${row.yield_ttm_pct?.toFixed(2)}% · P${Math.round(row.percentile_rank)} ${row.valuation || ""}`
+          : null;
+      const body = [annualPart, ttmPart].filter(Boolean).join("\n");
       try {
         new Notification(`${row.name} (${row.symbol}) 历史性低估`, {
-          body: `股息率 ${row.yield_pct?.toFixed(2)}% · P${Math.round(row.percentile_rank)} · ${row.valuation}`,
+          body,
           tag: `dividend-${row.symbol}`,
           icon: "/static/favicon.ico",
         });
@@ -1071,7 +1357,7 @@
     });
   }
 
-  setupSortHeaders();
+  setupSortToolbar();
   setupNotifyToggle();
   tick();
   setInterval(tick, refreshSeconds * 1000);

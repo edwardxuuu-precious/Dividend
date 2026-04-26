@@ -17,8 +17,11 @@ import urllib.request as _urllib_request  # noqa: E402
 
 _urllib_request.getproxies = lambda: {}
 
+from datetime import datetime as _datetime
+from io import BytesIO
+
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -80,6 +83,32 @@ templates = Jinja2Templates(directory=str(WEB_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 
 
+def _yield_class(pct: float | None) -> str:
+    if pct is None:
+        return ""
+    if pct >= 5:
+        return "yield-great"
+    if pct >= 3:
+        return "yield-good"
+    if pct < 1:
+        return "yield-warn"
+    return ""
+
+
+def _valuation_class(label: str | None) -> str:
+    return {
+        "历史性低估": "v-deep-cheap",
+        "偏低估": "v-cheap",
+        "中性": "v-neutral",
+        "偏高估": "v-rich",
+        "历史性高估": "v-deep-rich",
+    }.get(label or "", "")
+
+
+templates.env.globals["yield_class"] = _yield_class
+templates.env.globals["valuation_class"] = _valuation_class
+
+
 @app.get("/")
 def index(request: Request):
     return templates.TemplateResponse(
@@ -96,9 +125,14 @@ def api_yields() -> JSONResponse:
     for r in rows:
         d = asdict(r)
         d["updated_at"] = r.updated_at.isoformat(timespec="seconds")
+        d["price_ts"] = r.price_ts.isoformat(timespec="seconds") if r.price_ts else None
         payload.append(d)
     return JSONResponse(
-        {"refresh_seconds": config.refresh_seconds, "rows": payload}
+        {
+            "refresh_seconds": config.refresh_seconds,
+            "rows": payload,
+            "portfolio": watcher.portfolio_summary(rows),
+        }
     )
 
 
@@ -108,7 +142,10 @@ def api_yields_csv() -> PlainTextResponse:
     rows = watcher.snapshot()
     headers = [
         "代码", "名称", "现价", "最近年度每股分红", "派息年度",
-        "股息率%", "P 分位", "估值", "更新时间",
+        "年化股息率%", "TTM 股息率%",
+        "P 分位（年化）", "估值（年化）",
+        "P 分位（TTM）", "估值（TTM）",
+        "更新时间",
     ]
 
     def cell(v):
@@ -123,7 +160,9 @@ def api_yields_csv() -> PlainTextResponse:
     for r in rows:
         lines.append(",".join(cell(v) for v in [
             r.symbol, r.name, r.price, r.dividend, r.dividend_year,
-            r.yield_pct, r.percentile_rank, r.valuation,
+            r.yield_pct, r.yield_ttm_pct,
+            r.annual_percentile_rank, r.annual_valuation,
+            r.percentile_rank, r.valuation,
             r.updated_at.isoformat(timespec="seconds"),
         ]))
     body = "﻿" + "\r\n".join(lines) + "\r\n"  # BOM 让 Excel 自动识别 UTF-8
@@ -132,6 +171,37 @@ def api_yields_csv() -> PlainTextResponse:
         media_type="text/csv; charset=utf-8",
         headers={
             "Content-Disposition": "attachment; filename=dividend_watch.csv",
+        },
+    )
+
+
+@app.get("/api/report.pdf")
+def api_report_pdf() -> Response:
+    """渲染 watchlist 当前快照为 PDF（A4 打印就绪）。
+
+    用 xhtml2pdf（纯 Python，Windows 无需额外 runtime）。
+    """
+    from xhtml2pdf import pisa
+
+    rows = watcher.snapshot()
+    portfolio = watcher.portfolio_summary(rows)
+    now = _datetime.now()
+    html = templates.get_template("report.html").render({
+        "rows": rows,
+        "portfolio": portfolio,
+        "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+    })
+    buf = BytesIO()
+    status = pisa.CreatePDF(html, dest=buf, encoding="utf-8")
+    if status.err:
+        raise HTTPException(status_code=500, detail="PDF 渲染失败")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": (
+                f"attachment; filename=dividend_report_{now.strftime('%Y%m%d_%H%M')}.pdf"
+            ),
         },
     )
 

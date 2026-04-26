@@ -9,6 +9,7 @@ class Stock:
     symbol: str
     name: str
     exchange: str
+    shares: int = 0   # 持仓数量（股）；0 表示未持仓，仅观察用
 
 
 @dataclass(frozen=True)
@@ -46,10 +47,24 @@ class YieldRow:
     price: float | None
     dividend: float | None
     dividend_year: int | None
+    # 年化股息率（最近完整派息年累计 ÷ 实时价）—— 主排序键，与卡片大字一致
     yield_pct: float | None
     updated_at: datetime
     error: str | None = None
-    # 历史分位排名（0-100），仅当 history_service 静态缓存已就绪时有值。
-    # rank 越高 = 当前股息率在历史上越偏高 = 价格越便宜。
+    # 历史分位排名（0-100），基于 TTM 口径。
+    # rank 越高 = 当前 TTM 股息率在历史上越偏高 = 价格越便宜。
     percentile_rank: float | None = None
     valuation: str | None = None
+    # 历史分位排名 + 估值标签，基于"年化"口径（与卡片大字 yield_pct 同口径）。
+    # 与 TTM 的 percentile_rank 并列存在，让两套大字下方各挂自己的徽章。
+    annual_percentile_rank: float | None = None
+    annual_valuation: str | None = None
+    # TTM 股息率（过去 365 天滚动窗口实际除权 ÷ 实时价）—— 与详情/图表一致
+    yield_ttm_pct: float | None = None
+    # price 的真实获取时间。stale-on-failure 时仍是上次成功的时刻；
+    # 前端据此判断价格是否陈旧（updated_at - price_ts > 1.5 × refresh）。
+    price_ts: datetime | None = None
+    # 持仓相关：仅当 watchlist 配了 shares > 0 时填充
+    shares: int = 0
+    position_value: float | None = None   # shares × price
+    annual_cash: float | None = None      # shares × 最近年度每股分红

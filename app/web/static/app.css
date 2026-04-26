@@ -73,107 +73,262 @@ header h1 {
   color: var(--good);
   border-color: rgba(74, 210, 126, 0.5);
 }
+/* 通知按钮：默认显示图标 + 文字；窄屏 < 600px 仅留图标节省空间 */
+.notify-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.notify-btn::before {
+  content: attr(data-icon);
+  font-size: 13px;
+  line-height: 1;
+}
+@media (max-width: 600px) {
+  .notify-btn { font-size: 0; padding: 4px 8px; }   /* 隐藏文字节点 */
+  .notify-btn::before { font-size: 14px; }          /* 图标保留 */
+}
 
-main { padding: 24px 28px; }
+main { padding: 24px 28px; max-width: 1600px; margin: 0 auto; }
 
-table {
-  width: 100%;
-  border-collapse: collapse;
+/* ---------- 持仓摘要条 ---------- */
+.portfolio-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  margin-bottom: 24px;
+  padding: 22px 28px;
   background: var(--panel);
-  border-radius: 8px;
-  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
 }
-
-th, td {
-  padding: 12px 14px;
-  text-align: left;
-  border-bottom: 1px solid var(--border);
-  font-size: 14px;
+.portfolio-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 24px;
+  border-right: 1px solid var(--border);
 }
-
-th {
-  background: #1f2330;
+.portfolio-stat:last-child { border-right: none; }
+.portfolio-label {
+  font-size: 11px;
   color: var(--muted);
-  font-weight: 500;
-  font-size: 12px;
-  text-transform: uppercase;
   letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+.portfolio-value {
+  font-size: 24px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+.portfolio-value.good { color: var(--good); }
+@media (max-width: 800px) {
+  .portfolio-bar { grid-template-columns: repeat(2, 1fr); gap: 16px 0; }
+  .portfolio-stat:nth-child(2n) { border-right: none; }
 }
 
-td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-
-tr:last-child td { border-bottom: none; }
-
-/* 列头排序 */
-th.sortable {
+/* ---------- 排序工具条 ---------- */
+.sort-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 18px;
+}
+.sort-label {
+  font-size: 12px;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+  margin-right: 4px;
+}
+.sort-pill {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-family: inherit;
   cursor: pointer;
-  user-select: none;
-  transition: color 120ms;
+  transition: color 120ms, border-color 120ms, background 120ms;
 }
-th.sortable:hover { color: var(--text); }
-th.sortable::after {
-  content: "";
-  display: inline-block;
-  width: 0;
-  height: 0;
-  margin-left: 6px;
-  vertical-align: middle;
-  border-left: 4px solid transparent;
-  border-right: 4px solid transparent;
-  opacity: 0.25;
-  border-top: 5px solid currentColor;
+.sort-pill:hover { color: var(--text); border-color: #3a3f4a; }
+.sort-pill.active {
+  color: #fff;
+  border-color: var(--accent);
+  background: rgba(78,161,255,0.15);
 }
-th.sortable.sort-asc {
-  color: var(--accent);
+.sort-pill.active::after {
+  content: " ▼";
+  font-size: 9px;
+  margin-left: 2px;
 }
-th.sortable.sort-asc::after {
-  border-top: none;
-  border-bottom: 5px solid var(--accent);
-  opacity: 1;
+.sort-pill.active.sort-asc::after { content: " ▲"; }
+
+/* ---------- 卡片网格 ---------- */
+.cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 14px;
+  /* 当一张卡片展开成 full-width 时，dense 让后续卡片回填空槽，避免大块空白 */
+  grid-auto-flow: dense;
 }
-th.sortable.sort-desc {
-  color: var(--accent);
+.cards-loading { grid-column: 1 / -1; text-align: center; color: var(--muted); padding: 48px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  cursor: pointer;
+  /* 基线阴影：与背景之间一层薄薄的浮雕，分清"卡片"和"画布" */
+  box-shadow: 0 1px 2px rgba(0,0,0,0.18), 0 0 0 1px rgba(255,255,255,0.02) inset;
+  transition: border-color 150ms, transform 150ms, box-shadow 150ms;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
-th.sortable.sort-desc::after {
-  border-top: 5px solid var(--accent);
-  opacity: 1;
+.card:hover {
+  border-color: #3a4150;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.32), 0 0 0 1px rgba(255,255,255,0.03) inset;
+}
+.card.expanded {
+  border-color: var(--accent);
+  background: linear-gradient(180deg, #1c2230, var(--panel));
+}
+.card.error { border-color: rgba(255,93,93,0.4); }
+
+/* tier 1: 名称 */
+.card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.card-name { font-size: 15px; font-weight: 600; }
+.card-symbol { font-size: 11px; color: var(--muted); letter-spacing: 0.5px; }
+
+/* tier 2: 巨型 yield + 估值徽章 */
+.card-headline {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.card-yield-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  line-height: 1;
+}
+.card-yield {
+  font-size: 36px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+.card-yield .unit { font-size: 18px; color: var(--muted); margin-left: 2px; }
+.card-yield-tag {
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: var(--muted);
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  margin-left: 8px;
+  font-weight: 500;
+  font-variant-numeric: normal;
+}
+.card-yield-ttm {
+  font-size: 16px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+}
+.card-yield-ttm.muted { font-weight: 400; }
+.card-yield-ttm .unit-sm { font-size: 11px; color: var(--muted); margin-left: 1px; }
+.card-yield-error { font-size: 14px; color: var(--bad); font-style: italic; }
+
+/* tier 3: 价 / 分红 / 年度 */
+.card-facts {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+.card-fact { display: flex; gap: 4px; align-items: baseline; }
+.card-fact b {
+  color: var(--text);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
 }
 
-.loading { text-align: center; color: var(--muted); padding: 36px; }
-
-.yield-good   { color: var(--good); }
-.yield-great  { color: var(--great); font-weight: 600; }
-.yield-warn   { color: var(--warn); }
-
-.row-error td { color: var(--bad); font-style: italic; }
-
-.flash {
-  animation: flash 600ms ease-out;
+/* tier 4: 持仓信息（仅 shares > 0） */
+.card-position {
+  display: flex;
+  gap: 16px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  flex-wrap: wrap;
 }
+.card-position-label { color: var(--muted); margin-right: 4px; }
+.card-position-value {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* tier 5: 时间 */
+.card-time {
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 闪烁（数据更新时） */
+.flash { animation: flash 700ms ease-out; }
 @keyframes flash {
-  0%   { background: rgba(78,161,255,0.18); }
+  0%   { background: rgba(78,161,255,0.10); }
   100% { background: transparent; }
+}
+
+/* ---------- 详情面板（卡片下方 full-width grid item） ---------- */
+.card-detail {
+  grid-column: 1 / -1;
+  background: #0c0e13;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-top: -4px;     /* 视觉上贴近父卡片 */
 }
 
 footer {
   text-align: center;
   color: var(--muted);
   font-size: 12px;
-  padding: 18px;
+  padding: 22px;
+  margin-top: 32px;
   border-top: 1px solid var(--border);
 }
 
-/* ---------- 行点击 + 详情面板 ---------- */
+/* meta-time（header 时间戳）独立样式 */
+.meta-time { font-variant-numeric: tabular-nums; font-size: 12px; }
 
-tr.clickable { cursor: pointer; transition: background 120ms; }
-tr.clickable:hover { background: #1f2330; }
-tr.expanded { background: #1f2330; }
-
-tr.detail-row > td {
-  padding: 0;
-  background: #0c0e13;
-  border-bottom: 1px solid var(--border);
-}
+/* yield 分级颜色（card 内大字使用） */
+.yield-good   { color: var(--good); }
+.yield-great  { color: var(--great); }
+.yield-warn   { color: var(--warn); }
 
 .detail-panel {
   padding: 28px 32px 36px;
@@ -209,19 +364,66 @@ tr.detail-row > td {
   margin-bottom: 8px;
 }
 .summary-stock .muted { font-weight: 400; margin-left: 6px; font-size: 14px; }
-.summary-yield {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-bottom: 6px;
+.summary-dual-yield {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: stretch;
+  gap: 0;
+  margin-bottom: 12px;
+  padding: 14px 0 4px;
+  position: relative;
 }
+.dual-yield-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 18px;
+}
+.dual-yield-block:first-child { padding-left: 0; }
+.dual-yield-divider {
+  width: 1px;
+  background: var(--border);
+  margin: 4px 0;
+}
+.dual-yield-label {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+.dual-yield-label .muted {
+  text-transform: none;
+  letter-spacing: 0;
+  margin-left: 4px;
+  font-size: 11px;
+}
+.dual-yield-value { display: flex; align-items: baseline; gap: 2px; line-height: 1; }
 .big-yield {
-  font-size: 56px;
+  font-size: 44px;
   font-weight: 600;
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
-.big-suffix { font-size: 24px; color: var(--muted); margin-right: 8px; }
+.big-suffix { font-size: 18px; color: var(--muted); margin-right: 4px; }
+.dual-yield-basis {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+}
+.dual-yield-tags {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+@media (max-width: 720px) {
+  .summary-dual-yield { grid-template-columns: 1fr; }
+  .dual-yield-divider { display: none; }
+  .dual-yield-block { padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .dual-yield-block:last-of-type { border-bottom: none; }
+}
 .summary-meta { font-size: 13px; }
 .summary-meta b { color: var(--text); font-weight: 500; }
 
@@ -307,8 +509,19 @@ svg.yield-chart {
   stroke-dasharray: 4 4;
   opacity: 0.55;
 }
+.chart-line-annual {
+  fill: none;
+  stroke: #c084fc;          /* 紫色，与蓝色 TTM 线明显区分 */
+  stroke-width: 1.4;
+  opacity: 0.92;
+}
 .chart-hover-dot {
   fill: var(--accent);
+  stroke: white;
+  stroke-width: 1.5;
+}
+.chart-hover-dot-annual {
+  fill: #c084fc;
   stroke: white;
   stroke-width: 1.5;
 }
@@ -331,6 +544,38 @@ svg.yield-chart {
 }
 .chart-tooltip div { margin: 3px 0; }
 .chart-tooltip b { color: var(--text); }
+.chart-tooltip .tt-date {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+  margin-bottom: 6px;
+}
+.chart-tooltip .tt-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 图表图例 */
+.chart-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 10px;
+}
+.legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.legend-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 2px;
+  border-radius: 1px;
+  margin-right: 2px;
+  vertical-align: middle;
+}
+.legend-ttm    { background: var(--accent); }
+.legend-annual { background: #c084fc; }
 
 /* 双栏布局 */
 
@@ -356,6 +601,36 @@ svg.yield-chart {
   font-weight: 500;
   border: 1px solid transparent;
   white-space: nowrap;
+}
+
+/* 卡片头部：年化 + TTM 两枚徽章纵向叠放 */
+.valuation-stack {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+/* val-badge：徽章左侧加一个口径角标，区分这枚是年化还是 TTM 的分位 */
+.val-badge {
+  font-size: 11px;
+  padding: 3px 8px;
+  gap: 4px;
+}
+.val-tier {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.10);
+  color: inherit;
+  opacity: 0.85;
+}
+
+/* 详情页：把单口径徽章直接挂在对应大字块下方 */
+.dual-yield-badge {
+  margin-top: 8px;
+  min-height: 22px;
 }
 .valuation-deep-cheap { color: #fff; background: #15803d; border-color: #15803d; }
 .valuation-cheap      { color: #4ad27e; background: rgba(74,210,126,0.12); border-color: rgba(74,210,126,0.4); }
@@ -402,9 +677,29 @@ svg.yield-chart {
 .pct-label-p75 { fill: rgba(74,210,126,0.95); }
 .pct-label-p90 { fill: rgba(34,197,94,1); font-weight: 600; }
 
+/* ---------- 图表 narrow viewport 可读性补偿 ----------
+   SVG viewBox 固定 960x280；容器变窄时整体等比缩放，11px 字号实际渲染 6-7px 太小。
+   下面用 CSS 媒体查询把 SVG 内文本字号调大（user units），抵消缩放损失。
+   同时窄屏隐藏 P25/P50（不那么 actionable），只留 P75/P90 这两个"便宜区"阈值。 */
+@media (max-width: 900px) {
+  .chart-axis { font-size: 14px; }
+  .pct-label { font-size: 14px; }
+}
+@media (max-width: 600px) {
+  .chart-axis { font-size: 17px; }
+  .pct-label { font-size: 17px; }
+  .pct-line-p25, .pct-line-p50,
+  .pct-label-p25, .pct-label-p50 { display: none; }
+}
+
 .chart-eod-dot {
   fill: rgba(78,161,255,0.5);
   stroke: rgba(78,161,255,0.8);
+  stroke-width: 1;
+}
+.chart-eod-dot-annual {
+  fill: rgba(192,132,252,0.5);
+  stroke: rgba(192,132,252,0.85);
   stroke-width: 1;
 }
 
@@ -427,6 +722,9 @@ svg.yield-chart {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 12px;
+}
+@media (max-width: 720px) {
+  .forecast-grid { grid-template-columns: 1fr; }
 }
 .forecast-tier {
   background: var(--panel);
@@ -509,6 +807,12 @@ table.events-table td {
   padding: 9px 12px;
   font-size: 13px;
   border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+table.events-table th.num,
+table.events-table td.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 table.events-table tr:last-child td { border-bottom: none; }
 table.events-table th {

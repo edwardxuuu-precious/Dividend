@@ -10,35 +10,56 @@
   <header>
     <h1>A 股分红率监控</h1>
     <div class="meta">
-      <a href="/api/yields.csv" download class="meta-link" title="导出当前快照为 CSV">导出 CSV</a>
-      <button id="notify-toggle" type="button" class="meta-link" title="P 分位 ≥ 90 时桌面通知">通知：关</button>
-      <span id="last-updated">—</span>
+      <a href="/api/yields.csv" download class="meta-link" title="导出当前快照为 CSV">CSV</a>
+      <a href="/api/report.pdf" download class="meta-link" title="生成 PDF 报告">PDF</a>
+      <button id="notify-toggle" type="button" class="meta-link notify-btn" data-icon="🔔" title="P 分位 ≥ 90 时桌面通知">通知 关</button>
+      <span class="meta-time" id="last-updated">—</span>
       <span class="dot" id="status-dot" title="数据状态"></span>
     </div>
   </header>
 
   <main>
-    <table id="yield-table">
-      <thead>
-        <tr>
-          <th data-sort="symbol">代码</th>
-          <th data-sort="name">名称</th>
-          <th class="num" data-sort="price">现价</th>
-          <th class="num" data-sort="dividend">最近年度每股分红</th>
-          <th data-sort="dividend_year" title="按除权除息日所在自然年。如招行/工行这类每年只 1 次年度分红的，2026 年付的就是 FY2025 全部。多次派息的（如茅台/格力）会自动剔除尚未结束的当年。">派息年度</th>
-          <th class="num" data-sort="yield_pct">股息率</th>
-          <th data-sort="percentile_rank">估值（历史分位）</th>
-          <th>更新时间</th>
-        </tr>
-      </thead>
-      <tbody id="yield-tbody">
-        <tr><td colspan="8" class="loading">加载中…</td></tr>
-      </tbody>
-    </table>
+    <section id="portfolio-bar" class="portfolio-bar" style="display:none;">
+      <div class="portfolio-stat">
+        <div class="portfolio-label">持仓市值</div>
+        <div class="portfolio-value" id="portfolio-value">—</div>
+      </div>
+      <div class="portfolio-stat">
+        <div class="portfolio-label">年化分红现金</div>
+        <div class="portfolio-value good" id="portfolio-cash">—</div>
+      </div>
+      <div class="portfolio-stat">
+        <div class="portfolio-label">组合加权股息率</div>
+        <div class="portfolio-value good" id="portfolio-yield">—</div>
+      </div>
+      <div class="portfolio-stat">
+        <div class="portfolio-label">在持只数</div>
+        <div class="portfolio-value" id="portfolio-count">—</div>
+      </div>
+    </section>
+
+    <nav class="sort-bar" id="sort-bar">
+      <span class="sort-label">按</span>
+      <button type="button" class="sort-pill" data-sort="yield_pct" title="按派息年聚合每股分红 / 实时价">年化股息率</button>
+      <button type="button" class="sort-pill" data-sort="yield_ttm_pct" title="过去 365 天实际除权金额 / 实时价">TTM 股息率</button>
+      <button type="button" class="sort-pill" data-sort="annual_percentile_rank" title="年化股息率在历史样本中的百分位">P 分位（年化）</button>
+      <button type="button" class="sort-pill" data-sort="percentile_rank" title="TTM 股息率在历史样本中的百分位">P 分位（TTM）</button>
+      <button type="button" class="sort-pill" data-sort="price">现价</button>
+      <button type="button" class="sort-pill" data-sort="dividend">每股分红</button>
+      <button type="button" class="sort-pill" data-sort="dividend_year">派息年度</button>
+      <button type="button" class="sort-pill" data-sort="symbol">代码</button>
+      <button type="button" class="sort-pill" data-sort="name">名称</button>
+    </nav>
+
+    <section id="cards-grid" class="cards-grid">
+      <div class="cards-loading">加载中…</div>
+    </section>
   </main>
 
   <footer>
-    口径：最近一个完整年度每股分红 / 当前股价 · 数据源：akshare
+    双口径：<b>年化</b> = 最近完整派息年累计 / 实时价（卡片大字）；
+    <b>TTM</b> = 过去 365 天实际除权金额 / 实时价（详情/图表）。
+    <b>P 分位</b>分别基于两套口径的历史样本计算，徽章一一对应。 · 数据源：akshare
   </footer>
 
   <script src="/static/app.js"></script>
