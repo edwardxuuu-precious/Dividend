@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>分红率监控</title>
+  <meta name="refresh-seconds" content="{{ refresh_seconds }}">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header>
+    <h1>A 股分红率监控</h1>
+    <div class="meta">
+      <a href="/api/yields.csv" download class="meta-link" title="导出当前快照为 CSV">导出 CSV</a>
+      <button id="notify-toggle" type="button" class="meta-link" title="P 分位 ≥ 90 时桌面通知">通知：关</button>
+      <span id="last-updated">—</span>
+      <span class="dot" id="status-dot" title="数据状态"></span>
+    </div>
+  </header>
+
+  <main>
+    <table id="yield-table">
+      <thead>
+        <tr>
+          <th data-sort="symbol">代码</th>
+          <th data-sort="name">名称</th>
+          <th class="num" data-sort="price">现价</th>
+          <th class="num" data-sort="dividend">最近年度每股分红</th>
+          <th data-sort="dividend_year" title="按除权除息日所在自然年。如招行/工行这类每年只 1 次年度分红的，2026 年付的就是 FY2025 全部。多次派息的（如茅台/格力）会自动剔除尚未结束的当年。">派息年度</th>
+          <th class="num" data-sort="yield_pct">股息率</th>
+          <th data-sort="percentile_rank">估值（历史分位）</th>
+          <th>更新时间</th>
+        </tr>
+      </thead>
+      <tbody id="yield-tbody">
+        <tr><td colspan="8" class="loading">加载中…</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <footer>
+    口径：最近一个完整年度每股分红 / 当前股价 · 数据源：akshare
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

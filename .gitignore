@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+data/*.json
+!data/.gitkeep
+
+.idea/
+.vscode/
+*.log
+
+# Claude Code 本地状态 / 临时
+.claude/
+.playwright-mcp/
+
+# 根目录开发期截图（dashboard/v3-v6/lapsed_badge 等），文档内引用的图请放到 docs/
+/*.png
+
+# 私人工作日志（含 LLM 对话上下文），不公开到仓库
+Work_Progress/

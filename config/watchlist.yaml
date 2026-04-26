@@ -1,0 +1,31 @@
+refresh_seconds: 10
+
+# 可选：停止分红判定阈值（天）。距上次除权超过此天数仍无新分红 → 视为已停止分红（lapsed）。
+# 默认 540（≈ 18 个月）；A 股一年最多分两次，常见间隔 ≤ 15 个月，540 给一次容错。
+# 调小（如 200）可让更多股票提前进入 lapsed；调大则更宽容。详见档案 §3.16。
+# carry_stale_days: 540
+
+# 长期分红股 watchlist。加股票只改这里，业务代码不动。
+# exchange 仅用于显示/分类，行情/分红抓取按 symbol 自动推断市场。
+stocks:
+  - symbol: "600519"
+    name: "贵州茅台"
+    exchange: "SH"
+  - symbol: "000858"
+    name: "五粮液"
+    exchange: "SZ"
+  - symbol: "600036"
+    name: "招商银行"
+    exchange: "SH"
+  - symbol: "601398"
+    name: "工商银行"
+    exchange: "SH"
+  - symbol: "600900"
+    name: "长江电力"
+    exchange: "SH"
+  - symbol: "000651"
+    name: "格力电器"
+    exchange: "SZ"
+  - symbol: "601318"
+    name: "中国平安"
+    exchange: "SH"

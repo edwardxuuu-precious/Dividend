@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dividend-watch"
+version = "0.1.0"
+description = "本地实时分红率监控（A 股）"
+requires-python = ">=3.11"
+dependencies = [
+    "akshare>=1.13.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pyyaml>=6.0",
+    "jinja2>=3.1",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
