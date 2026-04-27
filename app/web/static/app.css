@@ -275,6 +275,23 @@ main { padding: 24px 28px; max-width: 1600px; margin: 0 auto; }
   font-variant-numeric: tabular-nums;
 }
 
+/* 行情过期水印：sina 这次没拉到，仍展示上次成功的价格 + 时间戳 */
+.stale-tag {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--warn);
+  background: rgba(255, 180, 84, 0.10);
+  border: 1px solid rgba(255, 180, 84, 0.35);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+  cursor: help;
+}
+
 /* tier 4: 持仓信息（仅 shares > 0） */
 .card-position {
   display: flex;

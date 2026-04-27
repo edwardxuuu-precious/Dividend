@@ -62,6 +62,22 @@
     return `${base}<span class="stale-tag" title="行情拉取失败，仍显示 ${t} 的实盘价；下次刷新自动恢复">⏱ ${t}</span>`;
   }
 
+  // 详情面板"当前价"后缀：实时正常 → 空；昨收兜底 → （昨收）；行情陈旧 → ⏱ HH:MM:SS
+  function liveSourceHtml(current) {
+    if (!current) return "";
+    if (current.source !== "live") {
+      return '<span class="live-source muted">（昨收）</span>';
+    }
+    if (current.live_ts) {
+      const lagSec = (Date.now() - Date.parse(current.live_ts)) / 1000;
+      if (lagSec > refreshSeconds * 1.5) {
+        const t = fmtTime(current.live_ts);
+        return ` <span class="stale-tag" title="行情拉取失败，仍显示 ${t} 的实盘价；下次刷新自动恢复">⏱ ${t}</span>`;
+      }
+    }
+    return "";
+  }
+
   function cardKey(row) { return `c-${row.symbol}`; }
   function detailKey(symbol) { return `d-${symbol}`; }
 
@@ -417,15 +433,13 @@
       current.valuation
     );
 
-    // summary-meta 里的"当前价"
+    // summary-meta 里的"当前价" + 行情陈旧水印
     const meta = dr.querySelector(".summary-meta");
     if (meta && current.live_price) {
       const priceEl = meta.querySelector(".live-price");
       if (priceEl) priceEl.textContent = fmtNumber(current.live_price, 2);
-      const sourceEl = meta.querySelector(".live-source");
-      if (sourceEl)
-        sourceEl.textContent =
-          current.source === "live" ? "" : "（昨收）";
+      const wrap = meta.querySelector(".live-source-wrap");
+      if (wrap) wrap.innerHTML = liveSourceHtml(current);
     }
 
     // 三档预估的"按现价"列也跟着实时变（重新渲染整个 forecast 块）
@@ -545,10 +559,8 @@
       const max = yields.length ? Math.max(...yields) : null;
       const min = yields.length ? Math.min(...yields) : null;
       const maxDate = max ? windowPoints.find((p) => p[3] === max)[0] : "—";
-      const liveSource =
-        current.source === "live" ? "" : '<span class="live-source">（昨收）</span>';
       detailRow.querySelector(".summary-meta").innerHTML = `
-        当前价 <b class="live-price">${fmtNumber(current.live_price, 2)}</b>${liveSource} ·
+        当前价 <b class="live-price">${fmtNumber(current.live_price, 2)}</b><span class="live-source-wrap">${liveSourceHtml(current)}</span> ·
         TTM 历史最高 ${fmtNumber(max, 2)}% (${maxDate}) ·
         最低 ${fmtNumber(min, 2)}% ·
         共 ${series.length.toLocaleString()} 个交易日

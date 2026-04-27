@@ -17,6 +17,16 @@ import urllib.request as _urllib_request  # noqa: E402
 
 _urllib_request.getproxies = lambda: {}
 
+# 在主线程预加载 py_mini_racer（akshare 间接依赖，用于解析东财加密 JS）。
+# 必须在任何 Thread 启动前完成 V8 PartitionAlloc 单次初始化，否则 4 并发 prewarm
+# 线程同时 lazy-load mini_racer.dll 时会触发 V8 致命断言：
+#   [FATAL:partition_address_space.cc] Check failed: !IsConfigurablePoolInitialized()
+# 进程立即崩溃，端口 8000 释放。预加载后第二次 import 会复用模块状态，安全。
+try:  # noqa: SIM105
+    import py_mini_racer  # noqa: F401
+except Exception:
+    pass
+
 from datetime import datetime as _datetime
 from io import BytesIO
 
@@ -39,7 +49,7 @@ app = FastAPI(title="Dividend Watch")
 config = load_config()
 _source = AkshareSource()
 _dividend_service = DividendService(_source)
-_price_service = PriceService(_source)  # 共用一个实例，让 5s 内存缓存被 watcher + history 复用
+_price_service = PriceService(_source, watchlist=config.stocks)  # 共用一个实例，让 5s 内存缓存被 watcher + history 复用；watchlist 用于单只调用扩展兜底
 history_service = HistoryService(
     bars_source=_source,
     dividend_service=_dividend_service,

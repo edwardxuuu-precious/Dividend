@@ -43,11 +43,17 @@ class WatcherService:
             annuals_list = [self.dividend_service.get_latest_annual(s) for s in stocks]
         annuals = dict(zip([s.symbol for s in stocks], annuals_list))
 
-        # P 分位 + 估值标签：仅读静态缓存，未就绪时为 None
+        # P 分位 + 估值标签：仅读静态缓存，未就绪时为 None。
+        # live_price 直接复用上面 quotes dict 里的价，避免 percentile_only 内部再发起
+        # 1-only 的 get_quotes 调用污染 PriceService 5s 共享缓存（详见 price_service.py）。
         percentiles: dict[str, dict | None] = {}
         if self.history_service is not None:
             for stock in stocks:
-                percentiles[stock.symbol] = self.history_service.get_percentile_only(stock)
+                quote = quotes.get(stock.symbol)
+                lp = quote.price if quote is not None and quote.price > 0 else None
+                percentiles[stock.symbol] = self.history_service.get_percentile_only(
+                    stock, live_price=lp
+                )
 
         now = datetime.now()
         rows: list[YieldRow] = []

@@ -82,12 +82,19 @@ class HistoryService:
         static = self._get_static(stock)
         return self._compute_live_current(stock, static)
 
-    def get_percentile_only(self, stock: Stock) -> dict | None:
+    def get_percentile_only(
+        self, stock: Stock, live_price: float | None = None
+    ) -> dict | None:
         """主表横向对比用：仅当静态缓存已就绪时返回双口径 P 分位 + 估值标签 + TTM 股息率。
 
         与 get_live_current 区别：**不会触发** _get_static 的冷启动（耗时几秒），
         所以可以安全地在每次 watcher.snapshot() 里调用。冷启动期间返回 None，
         前端显示"—"，等后台 prewarm 把 cache 填满后再下个 tick 出现。
+
+        live_price 可由调用方传入：watcher.snapshot() 已经在主表 tick 开头取过完整
+        watchlist 的批量行情，把对应价直接传进来即可，避免本函数再次发起 1-only 的
+        get_quotes 调用污染 PriceService 的 5s 共享缓存（详见 price_service.py 注释）。
+        如果传入 None，仍会回退到 price_service.get_quotes([stock])。
 
         返回字段同时覆盖两套口径：
           - percentile_rank / valuation —— TTM 分位（基于 TTM series 历史样本）
@@ -104,8 +111,7 @@ class HistoryService:
         if eod is None or not series:
             return None
 
-        live_price = None
-        if self.price_service is not None:
+        if live_price is None and self.price_service is not None:
             quotes = self.price_service.get_quotes([stock])
             quote = quotes.get(stock.symbol)
             if quote is not None and quote.price > 0:
