@@ -109,6 +109,27 @@ def test_ttl_caches_merged_snapshot():
     assert src.get_quotes.call_count == 1
 
 
+def test_full_failure_does_not_cache_so_next_call_retries_source():
+    """整批失败时不能缓存兜底结果，否则会把一次新浪抖动放大成 TTL 长度的全列陈旧。"""
+    src = MagicMock()
+    s1 = _stock("600519")
+    t0 = datetime(2026, 4, 26, 10, 0, 0)
+    src.get_quotes.return_value = {"600519": _quote("600519", 1500.0, ts=t0)}
+    ps = PriceService(src, ttl_seconds=60.0)
+    ps.get_quotes([s1])  # 第 1 次：成功，缓存 60s
+
+    # 第 2 次：在 TTL 内但 source 抛异常 —— 关键场景。
+    # 注意：成功结果仍在缓存里，要先把它清掉以模拟"缓存过期 + 当下失败"
+    ps.cache.clear()
+    src.get_quotes.side_effect = RuntimeError("network down")
+    ps.get_quotes([s1])  # 第 2 次：失败，必须不缓存
+
+    # 第 3 次：source 仍异常。如果上一次缓存了兜底结果，这里 source 不会被调用。
+    ps.get_quotes([s1])
+    # 期望 source 被打了 3 次（成功 1 + 失败 2），而不是 2 次
+    assert src.get_quotes.call_count == 3
+
+
 def test_recovery_after_failure_updates_last_good():
     """失败 → 兜底 → 恢复后 last_good 应更新到最新成功值。"""
     src = MagicMock()

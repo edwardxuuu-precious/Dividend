@@ -3,7 +3,9 @@
   --panel: #181b22;
   --text: #e6e6e6;
   --muted: #8a8f98;
-  --border: #262a33;
+  /* 全站去框线：层级靠面板背景色 + 轻微高光体现，而非可见 border。 */
+  --border: transparent;
+  --hover-bg: rgba(255,255,255,0.05);
   --accent: #4ea1ff;
   --good: #4ad27e;
   --great: #22c55e;
@@ -19,7 +21,12 @@ body {
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   background: var(--bg);
   color: var(--text);
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
 }
+
+main { flex: 1 0 auto; }
 
 header {
   display: flex;
@@ -52,26 +59,45 @@ header h1 {
 }
 .dot.ok { background: var(--good); }
 .dot.err { background: var(--bad); }
+/* warn = 局部数据未刷新到位（仍有股票回退/陈旧/缺数）。tooltip 列出 symbol 便于诊断 */
+.dot.warn { background: #f0b32a; box-shadow: 0 0 0 2px rgba(240,179,42,0.18); }
 
 .meta-link {
-  background: transparent;
+  background: rgba(255,255,255,0.04);
   color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px 10px;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 11px;
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
   text-decoration: none;
-  transition: color 120ms, border-color 120ms;
+  transition: color 120ms, background 120ms;
 }
 .meta-link:hover {
   color: var(--text);
-  border-color: var(--accent);
+  background: rgba(78, 161, 255, 0.18);
 }
 .meta-link.notify-on {
   color: var(--good);
-  border-color: rgba(74, 210, 126, 0.5);
+  background: rgba(74, 210, 126, 0.16);
+}
+/* 顶部"编辑"按钮激活态（编辑模式下变成"完成"） */
+.meta-link.active {
+  color: var(--accent, #4ea1ff);
+  background: rgba(78, 161, 255, 0.18);
+}
+.meta-link.danger {
+  color: #ff8888;
+  background: rgba(255, 93, 93, 0.14);
+}
+.meta-link.danger:hover:not(:disabled) {
+  color: #ffb3b3;
+  background: rgba(255, 93, 93, 0.22);
+}
+.meta-link:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 /* 通知按钮：默认显示图标 + 文字；窄屏 < 600px 仅留图标节省空间 */
 .notify-btn {
@@ -89,18 +115,20 @@ header h1 {
   .notify-btn::before { font-size: 14px; }          /* 图标保留 */
 }
 
-main { padding: 24px 28px; max-width: 1600px; margin: 0 auto; }
+/* width:100% 抵消 body 设置的 flex-column + 自动边距导致 main 不再 stretch、塌缩到内容宽度的问题。
+   保持 max-width 上限 + margin auto 居中。 */
+main { padding: 24px 28px; max-width: 1600px; margin: 0 auto; width: 100%; }
 
 /* ---------- 持仓摘要条 ---------- */
 .portfolio-bar {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 0;
-  margin-bottom: 24px;
-  padding: 22px 28px;
+  margin-bottom: 18px;
+  padding: 18px 24px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 6px;
 }
 .portfolio-stat {
   display: flex;
@@ -134,82 +162,436 @@ main { padding: 24px 28px; max-width: 1600px; margin: 0 auto; }
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 .sort-label {
   font-size: 12px;
   color: var(--muted);
   letter-spacing: 0.5px;
-  margin-right: 4px;
+  margin-right: 2px;
 }
-.sort-pill {
-  background: transparent;
-  color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 6px 14px;
+.sort-bar-spacer { flex: 1; }
+
+.sort-select {
+  background-color: var(--panel);
+  color: var(--text);
+  border: none;
+  border-radius: 4px;
+  padding: 6px 26px 6px 10px;
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
-  transition: color 120ms, border-color 120ms, background 120ms;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+                    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  transition: background-color 120ms;
 }
-.sort-pill:hover { color: var(--text); border-color: #3a3f4a; }
-.sort-pill.active {
+.sort-select:hover { background-color: #232733; }
+.sort-select:focus { outline: none; background-color: #232733; }
+
+.sort-dir {
+  background: rgba(255,255,255,0.04);
+  color: var(--muted);
+  border: none;
+  border-radius: 4px;
+  width: 28px;
+  height: 28px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 120ms, background 120ms;
+}
+.sort-dir:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+
+.sort-bar-btn {
+  background: rgba(255,255,255,0.04);
+  color: var(--muted);
+  border: none;
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 120ms, background 120ms;
+}
+.sort-bar-btn:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+.sort-bar-btn.active {
   color: #fff;
-  border-color: var(--accent);
-  background: rgba(78,161,255,0.15);
+  background: rgba(78,161,255,0.22);
 }
-.sort-pill.active::after {
-  content: " ▼";
-  font-size: 9px;
-  margin-left: 2px;
+
+.view-toggle {
+  display: inline-flex;
+  background: rgba(255,255,255,0.04);
+  border-radius: 4px;
+  overflow: hidden;
 }
-.sort-pill.active.sort-asc::after { content: " ▲"; }
+.view-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: color 120ms, background 120ms;
+}
+.view-btn:hover { color: var(--text); background: rgba(255,255,255,0.05); }
+.view-btn.active {
+  color: #fff;
+  background: rgba(78,161,255,0.22);
+}
 
 /* ---------- 卡片网格 ---------- */
 .cards-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
   /* 当一张卡片展开成 full-width 时，dense 让后续卡片回填空槽，避免大块空白 */
   grid-auto-flow: dense;
 }
 .cards-loading { grid-column: 1 / -1; text-align: center; color: var(--muted); padding: 48px; }
 
+/* ---------- 列表视图 ---------- */
+.cards-grid.view-list {
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--panel);
+}
+.cards-grid.view-list .cards-loading { padding: 32px; }
+
+/* 表头与数据行共用同一套 grid 模板，保证列对齐。
+   操作/时间列已移到顶部"编辑"按钮统一处理，行尾不再占位。 */
+.list-header,
+.list-row {
+  display: grid;
+  grid-template-columns:
+    minmax(140px, 1.4fr)   /* 名称/代码（含勾选框留位） */
+    minmax(70px, 0.7fr)    /* 年化% */
+    minmax(60px, 0.6fr)    /* TTM% */
+    minmax(120px, 1.1fr)   /* 年化分位 */
+    minmax(120px, 1.1fr)   /* TTM 分位 */
+    minmax(70px, 0.8fr)    /* 现价 */
+    minmax(80px, 0.9fr)    /* 每股 */
+    minmax(50px, 0.5fr);   /* 派息年 */
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  font-size: 12px;
+}
+
+.list-header {
+  background: rgba(255,255,255,0.02);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: none;
+  user-select: none;
+}
+.list-header .lh-cell {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.list-row {
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  position: relative;
+  transition: background 120ms;
+}
+.list-row:last-child { border-bottom: none; }
+.list-row:hover { background: rgba(78,161,255,0.05); }
+.list-row.expanded { background: rgba(78,161,255,0.10); }
+.list-row.error { background: rgba(255,93,93,0.06); }
+
+.lr-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.lr-name-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.lr-stock { font-size: 14px; font-weight: 600; color: var(--text); }
+.lr-symbol { font-size: 11px; color: var(--muted); letter-spacing: 0.5px; }
+
+/* 列表里复用 .card-yield-stack，但缩小字号 */
+.list-row .valuation-stack { gap: 3px; }
+.list-row .val-badge { font-size: 10px; padding: 2px 6px; }
+
+/* 列表视图分位列：数字平铺 + 状态用一个小圆点表示。
+   颜色方案与卡片估值徽章共用 valuation-* 类，并在页脚 legend 解释。
+   .lr-tier 用 inline-flex + 固定数字宽度，让 P100/P91/P82 等不同位数的圆点
+   在垂直方向上对齐到同一列，避免「歪」的视觉问题。 */
+.lr-tier {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.lr-tier-text {
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 36px;          /* 固定宽度容纳 P100；让圆点起点统一 */
+  display: inline-block;
+}
+.lr-tier-text.muted { color: var(--muted); font-weight: 400; }
+.lr-status-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: var(--muted);
+  cursor: help;
+}
+.lr-status-dot.valuation-deep-cheap { background: #22c55e; box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.18); }
+.lr-status-dot.valuation-cheap      { background: #4ad27e; }
+.lr-status-dot.valuation-neutral    { background: #8a8f98; }
+.lr-status-dot.valuation-rich       { background: #ffb454; }
+.lr-status-dot.valuation-deep-rich  { background: #ff5d5d; box-shadow: 0 0 0 2px rgba(255, 93, 93, 0.18); }
+
+/* 含特别小图标：纯黄色三角，悬浮 tooltip 显示详情 */
+.lr-warn-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 4px;
+  color: var(--warn);
+  font-size: 12px;
+  cursor: help;
+  opacity: 0.9;
+}
+
+/* 列表里复用 .card-yield-stack，但缩小字号 */
+.list-row .card-yield { font-size: 15px; }
+.list-row .card-yield .unit { font-size: 11px; }
+.list-row .card-yield-tag { font-size: 9px; padding: 1px 5px; }
+.list-row .card-yield-ttm { font-size: 14px; }
+
+.lr-cell {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.lr-cell.muted { color: var(--muted); }
+.lr-cell-label { color: var(--muted); margin-right: 2px; font-size: 10px; }
+
+/* 列表行下方的详情面板：取消负 margin、占满整行 */
+.cards-grid.view-list .card-detail {
+  margin-top: 0;
+  border-top: none;
+  border-radius: 0;
+  border-left: none;
+  border-right: none;
+}
+
+/* ---------- 编辑模式（多选删除） ---------- */
+
+/* 顶部工具条：进入编辑模式后显式提示当前选中数 + 批量操作入口 */
+.edit-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  background: rgba(78, 161, 255, 0.10);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--text);
+}
+.edit-toolbar[hidden] { display: none; }
+.edit-toolbar-msg b { color: var(--accent, #4ea1ff); font-weight: 700; }
+.edit-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 默认隐藏勾选框；进入编辑模式后才在每行/卡片显示一个 */
+.select-checkbox {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  user-select: none;
+}
+.select-checkbox input {
+  /* 视觉用 .select-box 自绘，原生 input 仅做无障碍 fallback */
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+.select-box {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.14);
+  display: inline-block;
+  position: relative;
+  flex-shrink: 0;
+  transition: background 120ms;
+}
+.select-checkbox:hover .select-box {
+  background: rgba(78, 161, 255, 0.45);
+}
+.select-checkbox input:checked + .select-box {
+  background: var(--accent, #4ea1ff);
+}
+.select-checkbox input:checked + .select-box::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 0;
+  width: 4px;
+  height: 8px;
+  border: solid #0d1117;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+/* 卡片视图：勾选框绝对定位在左上角 */
+.card .card-select {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 2;
+}
+
+body.edit-mode .select-checkbox { display: inline-flex; }
+
+/* 编辑模式下隐藏每张卡片右上角的单股 edit/delete 按钮，避免与多选混淆 */
+body.edit-mode .card-actions { display: none !important; }
+
+/* 卡片头部默认有 padding-right 给右上角按钮让位；编辑模式无按钮可稍微回收，
+   同时左侧加 padding 给勾选框留位 */
+body.edit-mode .card .card-head {
+  padding-left: 28px;
+  padding-right: 0;
+}
+
+/* 选中态：用更明显的背景色区分（不再使用边框/box-shadow 框线） */
+.card.selected,
+.list-row.selected {
+  background: rgba(78, 161, 255, 0.22);
+}
+.cards-grid.view-list .list-row.selected {
+  background: rgba(78, 161, 255, 0.22);
+}
+
+/* 编辑模式下行/卡片整体可点击勾选 */
+body.edit-mode .card,
+body.edit-mode .list-row {
+  cursor: pointer;
+}
+
+/* 批量删除 modal 中的 symbol 列表 */
+.bulk-del-list {
+  max-height: 240px;
+  overflow-y: auto;
+  border-radius: 4px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  margin: 6px 0 4px;
+}
+.bulk-del-item {
+  font-size: 13px;
+  padding: 4px 0;
+}
+.bulk-del-item .muted { color: var(--muted); margin-left: 6px; font-size: 12px; }
+
+/* 窄屏：列表降级——隐藏部分列。表头/数据行同步切换列模板 */
+@media (max-width: 1100px) {
+  .list-header,
+  .list-row {
+    grid-template-columns:
+      minmax(120px, 1.4fr)   /* 名称 */
+      minmax(60px, 0.7fr)    /* 年化% */
+      minmax(60px, 0.6fr)    /* TTM% */
+      minmax(110px, 1.1fr)   /* 年化分位 */
+      minmax(70px, 0.8fr)    /* 现价 */
+      minmax(70px, 0.8fr)    /* 每股 */
+      minmax(50px, 0.5fr);   /* 派息年 */
+  }
+  .list-row .lr-hide-md,
+  .list-header .lr-hide-md { display: none; }
+}
+@media (max-width: 700px) {
+  .list-header,
+  .list-row {
+    grid-template-columns:
+      minmax(110px, 1.4fr)   /* 名称 */
+      minmax(60px, 0.7fr)    /* 年化% */
+      minmax(60px, 0.6fr)    /* TTM% */
+      minmax(110px, 1.1fr)   /* 年化分位 */
+      minmax(70px, 0.8fr)    /* 现价 */
+      minmax(70px, 0.8fr);   /* 每股 */
+  }
+  .list-row .lr-hide-sm,
+  .list-header .lr-hide-sm { display: none; }
+  .list-header,
+  .list-row { padding: 10px 10px; gap: 8px; }
+}
+
 .card {
   background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 18px 20px;
+  border-radius: 6px;
+  padding: 14px 16px;
   cursor: pointer;
-  /* 基线阴影：与背景之间一层薄薄的浮雕，分清"卡片"和"画布" */
-  box-shadow: 0 1px 2px rgba(0,0,0,0.18), 0 0 0 1px rgba(255,255,255,0.02) inset;
-  transition: border-color 150ms, transform 150ms, box-shadow 150ms;
+  /* 无 border：靠面板色 + 阴影区分卡片与画布 */
+  box-shadow: 0 1px 2px rgba(0,0,0,0.18);
+  transition: transform 150ms, box-shadow 150ms, background 150ms;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   position: relative;   /* 让 .card-actions absolute 定位以本卡片为基准 */
 }
 .card:hover {
-  border-color: #3a4150;
   transform: translateY(-1px);
-  box-shadow: 0 6px 18px rgba(0,0,0,0.32), 0 0 0 1px rgba(255,255,255,0.03) inset;
+  background: #1d2029;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.32);
 }
 .card.expanded {
-  border-color: var(--accent);
-  background: linear-gradient(180deg, #1c2230, var(--panel));
+  background: linear-gradient(180deg, rgba(78,161,255,0.18), var(--panel) 60%);
+  box-shadow: 0 6px 18px rgba(0,0,0,0.32);
 }
-.card.error { border-color: rgba(255,93,93,0.4); }
+.card.error { background: linear-gradient(180deg, rgba(255,93,93,0.10), var(--panel) 60%); }
 
-/* tier 1: 名称 */
+/* tier 1: 名称 + 代码（代码紧贴名称右侧） */
 .card-head {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
   gap: 8px;
+  /* 给右上角 .card-actions 让出空间，避免长名称与按钮区重叠 */
+  padding-right: 64px;
+  min-width: 0;
 }
-.card-name { font-size: 15px; font-weight: 600; }
-.card-symbol { font-size: 11px; color: var(--muted); letter-spacing: 0.5px; }
+.card-name {
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.card-symbol {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
 
 /* tier 2: 巨型 yield + 估值徽章 */
 .card-headline {
@@ -227,15 +609,16 @@ main { padding: 24px 28px; max-width: 1600px; margin: 0 auto; }
   line-height: 1;
 }
 .card-yield {
-  font-size: 36px;
+  font-size: 32px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1;
   display: inline-flex;
   align-items: baseline;
   gap: 4px;
+  letter-spacing: -0.5px;
 }
-.card-yield .unit { font-size: 18px; color: var(--muted); margin-left: 2px; }
+.card-yield .unit { font-size: 15px; color: var(--muted); margin-left: 2px; }
 .card-yield-tag {
   font-size: 10px;
   letter-spacing: 0.5px;
@@ -251,11 +634,10 @@ main { padding: 24px 28px; max-width: 1600px; margin: 0 auto; }
 /* 含特别股利 / 派息年合计远高于历史中位数 → 橙色警告样式提示这不是常态化数字 */
 .card-yield-tag.warn {
   color: var(--warn);
-  background: rgba(255, 180, 84, 0.12);
-  border-color: rgba(255, 180, 84, 0.4);
+  background: rgba(255, 180, 84, 0.16);
 }
 .card-yield-ttm {
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.2px;
@@ -292,8 +674,7 @@ main { padding: 24px 28px; max-width: 1600px; margin: 0 auto; }
   font-size: 10px;
   font-weight: 500;
   color: var(--warn);
-  background: rgba(255, 180, 84, 0.10);
-  border: 1px solid rgba(255, 180, 84, 0.35);
+  background: rgba(255, 180, 84, 0.14);
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.2px;
   cursor: help;
@@ -333,17 +714,189 @@ main { padding: 24px 28px; max-width: 1600px; margin: 0 auto; }
   grid-column: 1 / -1;
   background: #0c0e13;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 6px;
   margin-top: -4px;     /* 视觉上贴近父卡片 */
 }
 
-footer {
-  text-align: center;
+/* ---------- 站点 footer：默认极简单行，点击「指标说明」展开口径面板 ---------- */
+.site-footer {
+  flex-shrink: 0;
+  margin-top: 24px;
+  /* --border 全站为 transparent，footer 这里需要一道可见细线，所以显式写颜色 */
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.18);
   color: var(--muted);
-  font-size: 12px;
-  padding: 22px;
-  margin-top: 32px;
-  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+}
+.footer-details { width: 100%; }
+.footer-details > summary {
+  list-style: none;
+  cursor: pointer;
+  outline: none;
+}
+.footer-details > summary::-webkit-details-marker { display: none; }
+.footer-details > summary::marker { content: ''; }
+
+.footer-bar {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 9px 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.footer-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  letter-spacing: 0.2px;
+  color: var(--muted);
+}
+.footer-brand {
+  color: var(--text);
+  opacity: 0.7;
+  font-weight: 500;
+}
+.footer-sep { opacity: 0.35; }
+.footer-disclaimer { opacity: 0.7; }
+.footer-link {
+  color: var(--accent);
+  text-decoration: none;
+  opacity: 0.85;
+  border-bottom: 1px dashed transparent;
+  transition: opacity 120ms, border-color 120ms;
+}
+.footer-link:hover {
+  opacity: 1;
+  border-bottom-color: var(--accent);
+}
+
+.footer-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 3px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  letter-spacing: 0.3px;
+  transition: color 120ms, background 120ms, border-color 120ms;
+}
+.footer-bar:hover .footer-toggle {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.footer-toggle-icon {
+  transition: transform 200ms ease;
+  opacity: 0.85;
+}
+.footer-details[open] .footer-toggle-icon {
+  transform: rotate(-180deg);
+}
+
+.footer-details[open] > summary.footer-bar {
+  /* 展开时给单行 bar 一道分隔线，提示下方是补充信息 */
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.footer-panel {
+  max-width: 1600px;
+  margin: 0 auto;
+  padding: 18px 28px 22px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: 36px;
+}
+.footer-col-title {
+  margin: 0 0 10px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+  color: var(--text);
+  opacity: 0.55;
+}
+.footer-defs {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.footer-defs > div {
+  display: grid;
+  grid-template-columns: 60px 1fr;
+  gap: 12px;
+  align-items: baseline;
+  line-height: 1.5;
+}
+.footer-defs dt {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.3px;
+  color: var(--accent);
+  opacity: 0.9;
+}
+.footer-defs dd {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text);
+  opacity: 0.7;
+}
+.footer-defs dd em {
+  font-style: normal;
+  color: var(--muted);
+  opacity: 0.85;
+  margin-left: 2px;
+}
+
+/* 估值状态色 legend：每行一个状态，左侧是同款 lr-status-dot 圆点 */
+.status-legend {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.status-legend li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text);
+  opacity: 0.78;
+}
+.status-legend li em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 10.5px;
+  margin-left: 2px;
+  letter-spacing: 0.2px;
+}
+.status-legend li .lr-status-dot {
+  flex-shrink: 0;
+  cursor: default;
+}
+
+.footer-note {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  line-height: 1.65;
+  opacity: 0.85;
+}
+
+@media (max-width: 720px) {
+  .footer-bar { padding: 9px 18px; }
+  .footer-panel {
+    grid-template-columns: 1fr;
+    gap: 18px;
+    padding: 16px 18px 18px;
+  }
 }
 
 /* meta-time（header 时间戳）独立样式 */
@@ -379,7 +932,7 @@ footer {
 .summary-card {
   background: linear-gradient(180deg, #1c2230, #181b22);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 6px;
   padding: 22px 28px;
 }
 .summary-stock {
@@ -472,32 +1025,31 @@ footer {
   flex-wrap: wrap;
 }
 .chart-btn {
-  background: var(--panel);
+  background: rgba(255,255,255,0.04);
   color: var(--muted);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border: none;
+  border-radius: 4px;
   padding: 4px 12px;
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
-  transition: background 120ms, color 120ms, border-color 120ms;
+  transition: background 120ms, color 120ms;
 }
 .chart-btn:hover {
-  background: #232733;
+  background: rgba(255,255,255,0.08);
   color: var(--text);
 }
 .chart-btn.active {
   background: var(--accent);
   color: #fff;
-  border-color: var(--accent);
 }
 .chart-btn-reset {
   margin-left: auto;
   color: var(--warn);
-  border-color: rgba(255, 180, 84, 0.4);
+  background: rgba(255, 180, 84, 0.10);
 }
 .chart-btn-reset:hover {
-  background: rgba(255, 180, 84, 0.12);
+  background: rgba(255, 180, 84, 0.18);
   color: var(--warn);
 }
 .chart-zoom-hint {
@@ -539,6 +1091,16 @@ svg.yield-chart {
   stroke-width: 1.4;
   opacity: 0.92;
 }
+.chart-line-price {
+  fill: none;
+  stroke: #eab308;          /* 金色，右轴股价线 */
+  stroke-width: 1.2;
+  opacity: 0.7;
+}
+.chart-axis-price {
+  fill: #eab308;
+  opacity: 0.85;
+}
 .chart-hover-dot {
   fill: var(--accent);
   stroke: white;
@@ -546,6 +1108,11 @@ svg.yield-chart {
 }
 .chart-hover-dot-annual {
   fill: #c084fc;
+  stroke: white;
+  stroke-width: 1.5;
+}
+.chart-hover-dot-price {
+  fill: #eab308;
   stroke: white;
   stroke-width: 1.5;
 }
@@ -557,9 +1124,8 @@ svg.yield-chart {
 .chart-tooltip {
   position: absolute;
   background: #232733;
-  border: 1px solid var(--border);
   padding: 10px 12px;
-  border-radius: 6px;
+  border-radius: 4px;
   font-size: 12px;
   pointer-events: none;
   white-space: nowrap;
@@ -579,27 +1145,152 @@ svg.yield-chart {
   align-items: center;
   gap: 4px;
 }
+/* 滚动模式专属：曲线值下方一组 P10/P25/P50/P75/P90 网格。
+   每个分位单独一格（标签在上、数值在下），仅渲染当前可见的分位列。
+   颜色与对应 band 系列同色（TTM 蓝 / 年化紫），P50 中位列高亮区分。*/
+.chart-tooltip .tt-band {
+  margin: 4px 0 6px 14px;
+  letter-spacing: 0.2px;
+}
+.chart-tooltip .tt-band-title {
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 3px;
+  letter-spacing: 0.3px;
+}
+.chart-tooltip .tt-band-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(40px, 1fr);
+  gap: 2px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: rgba(255,255,255,0.025);
+  margin: 0;
+}
+.chart-tooltip .tt-band-grid > .tt-band-cell { margin: 0; }
+.chart-tooltip .tt-band-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 6px 4px;
+  line-height: 1.2;
+  background: rgba(78,161,255,0.10);
+}
+.chart-tooltip .tt-band-cell .tt-band-k {
+  font-size: 10px;
+  color: rgba(78,161,255,0.75);
+  letter-spacing: 0.4px;
+  font-weight: 500;
+}
+.chart-tooltip .tt-band-cell .tt-band-v {
+  font-size: 12px;
+  color: rgba(78,161,255,1);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  margin-top: 1px;
+}
+/* 中位 P50 强调：背景更亮 + 上下短分隔条暗示这是中位 */
+.chart-tooltip .tt-band-cell-p50 {
+  background: rgba(78,161,255,0.22);
+  box-shadow: inset 0 1px 0 rgba(78,161,255,0.45),
+              inset 0 -1px 0 rgba(78,161,255,0.45);
+}
+/* 年化系列：整体改紫色 */
+.chart-tooltip .tt-band-annual .tt-band-cell { background: rgba(192,132,252,0.10); }
+.chart-tooltip .tt-band-annual .tt-band-cell .tt-band-k { color: rgba(192,132,252,0.75); }
+.chart-tooltip .tt-band-annual .tt-band-cell .tt-band-v { color: rgba(192,132,252,1); }
+.chart-tooltip .tt-band-annual .tt-band-cell-p50 {
+  background: rgba(192,132,252,0.22);
+  box-shadow: inset 0 1px 0 rgba(192,132,252,0.45),
+              inset 0 -1px 0 rgba(192,132,252,0.45);
+}
 
-/* 图表图例 */
+/* 图表图例（每条曲线/分位线一个 chip，点击切换显示） */
 .chart-legend {
   display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 4px;
   font-size: 11px;
   color: var(--muted);
   margin-left: 10px;
+  flex-wrap: wrap;
 }
 .legend-item { display: inline-flex; align-items: center; gap: 4px; }
+.legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 120ms, color 120ms, opacity 120ms;
+}
+.legend-chip:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+}
+.legend-chip.off { opacity: 0.42; }
+.legend-chip.off .legend-label {
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+.legend-chip.off .legend-swatch {
+  filter: grayscale(0.85);
+  opacity: 0.55;
+}
 .legend-swatch {
   display: inline-block;
-  width: 12px;
+  width: 14px;
   height: 2px;
   border-radius: 1px;
-  margin-right: 2px;
   vertical-align: middle;
 }
 .legend-ttm    { background: var(--accent); }
 .legend-annual { background: #c084fc; }
+.legend-price  { background: #eab308; }
+/* 滚动带的 3 个组件 swatch（仅 rolling 模式显示），形态与图上对应：
+   - 外带：浅蓝色实心矩形（与 .band-ttm-outer 同色）
+   - 内带：稍深蓝色实心矩形（与 .band-ttm-inner 同色）
+   - 中位：蓝色虚线（与 .band-ttm-median 同样虚线段） */
+.legend-band-outer  { background: rgba(78,161,255,0.32); height: 8px; border-radius: 2px; }
+.legend-band-inner  { background: rgba(78,161,255,0.55); height: 8px; border-radius: 2px; }
+.legend-band-median {
+  background: linear-gradient(90deg,
+    rgba(78,161,255,0.9) 0 3px, transparent 3px 6px,
+    rgba(78,161,255,0.9) 6px 9px, transparent 9px 12px,
+    rgba(78,161,255,0.9) 12px 14px);
+  height: 2px;
+}
+/* 分位线 swatch 配色对齐 .pct-line-*；虚线段感用 linear-gradient 渲染 */
+.legend-p25 {
+  background: linear-gradient(90deg,
+    rgba(255,180,84,0.9) 0 4px, transparent 4px 7px,
+    rgba(255,180,84,0.9) 7px 11px, transparent 11px 14px);
+}
+.legend-p50 {
+  background: linear-gradient(90deg,
+    rgba(200,200,200,0.65) 0 4px, transparent 4px 7px,
+    rgba(200,200,200,0.65) 7px 11px, transparent 11px 14px);
+}
+.legend-p75 {
+  background: linear-gradient(90deg,
+    rgba(74,210,126,0.9) 0 4px, transparent 4px 7px,
+    rgba(74,210,126,0.9) 7px 11px, transparent 11px 14px);
+}
+.legend-p90 {
+  background: linear-gradient(90deg,
+    rgba(34,197,94,1) 0 4px, transparent 4px 7px,
+    rgba(34,197,94,1) 7px 11px, transparent 11px 14px);
+  height: 3px;
+}
 
 /* 双栏布局 */
 
@@ -607,12 +1298,12 @@ svg.yield-chart {
   display: grid;
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
   gap: 28px;
-  align-items: start;
+  align-items: stretch;
 }
 @media (max-width: 1100px) {
   .two-col { grid-template-columns: 1fr; }
 }
-.col { min-width: 0; }
+.col { min-width: 0; display: flex; flex-direction: column; }
 
 /* 估值徽章 */
 
@@ -620,10 +1311,9 @@ svg.yield-chart {
   display: inline-flex;
   align-items: center;
   padding: 4px 10px;
-  border-radius: 12px;
+  border-radius: 6px;
   font-size: 13px;
   font-weight: 500;
-  border: 1px solid transparent;
   white-space: nowrap;
 }
 
@@ -645,7 +1335,7 @@ svg.yield-chart {
   font-weight: 600;
   letter-spacing: 0.4px;
   padding: 1px 5px;
-  border-radius: 8px;
+  border-radius: 6px;
   background: rgba(255,255,255,0.10);
   color: inherit;
   opacity: 0.85;
@@ -656,38 +1346,41 @@ svg.yield-chart {
   margin-top: 8px;
   min-height: 22px;
 }
-.valuation-deep-cheap { color: #fff; background: #15803d; border-color: #15803d; }
-.valuation-cheap      { color: #4ad27e; background: rgba(74,210,126,0.12); border-color: rgba(74,210,126,0.4); }
-.valuation-neutral    { color: var(--muted); background: rgba(255,255,255,0.05); border-color: var(--border); }
-.valuation-rich       { color: #ffb454; background: rgba(255,180,84,0.12); border-color: rgba(255,180,84,0.4); }
-.valuation-deep-rich  { color: #fff; background: #b91c1c; border-color: #b91c1c; }
+.valuation-deep-cheap { color: #fff; background: #15803d; }
+.valuation-cheap      { color: #4ad27e; background: rgba(74,210,126,0.16); }
+.valuation-neutral    { color: var(--muted); background: rgba(255,255,255,0.06); }
+.valuation-rich       { color: #ffb454; background: rgba(255,180,84,0.16); }
+.valuation-deep-rich  { color: #fff; background: #b91c1c; }
 
 /* lapsed 警告徽章 */
 .lapsed-tag {
   display: inline-block;
   font-size: 12px;
   padding: 4px 10px;
-  border-radius: 4px;
-  margin-left: 8px;
+  border-radius: 6px;
   white-space: nowrap;
   font-weight: 500;
-  border: 1px solid transparent;
   vertical-align: middle;
+  /* 元素是 <button>，去除浏览器默认 outset border / 渐变背景，避免出现立体效果，与其他 tag 统一 */
+  border: none;
+  appearance: none;
+  -webkit-appearance: none;
 }
 .lapsed-current {
   color: #fff;
   background: #b91c1c;
-  border-color: #b91c1c;
 }
 .lapsed-history {
   color: #ffb454;
-  background: rgba(255,180,84,0.10);
-  border-color: rgba(255,180,84,0.35);
+  background: rgba(255,180,84,0.14);
 }
 
 /* lapsed 徽章本体可点击展开下方明细面板 */
 .lapsed-badge {
   display: block;
+  flex-basis: 100%;       /* 占满 .dual-yield-tags 整行，让下方面板能横向铺开 */
+  width: 100%;
+  min-width: 0;
 }
 .lapsed-tag.lapsed-clickable {
   cursor: pointer;
@@ -698,8 +1391,7 @@ svg.yield-chart {
   align-items: center;
   gap: 4px;
   padding: 4px 10px;
-  border-radius: 4px;
-  margin-left: 8px;
+  border-radius: 6px;
   white-space: nowrap;
   transition: filter 0.15s ease;
 }
@@ -721,14 +1413,15 @@ svg.yield-chart {
 }
 
 .lapsed-detail-panel {
-  margin: 10px 0 4px 8px;
-  padding: 12px 14px;
+  flex-basis: 100%;
+  width: 100%;
+  margin: 12px 0 4px;
+  padding: 14px 16px;
   background: rgba(255,180,84,0.06);
-  border: 1px solid rgba(255,180,84,0.30);
   border-radius: 6px;
-  max-width: 720px;
   font-size: 12.5px;
   line-height: 1.55;
+  box-sizing: border-box;
 }
 .lapsed-detail-panel[hidden] { display: none; }
 .lapsed-detail-intro {
@@ -739,56 +1432,67 @@ svg.yield-chart {
   color: #ffb454;
   font-weight: 600;
 }
-.lapsed-detail-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+
+/* 表格化布局：每段 5 列横向铺满，避免左挤右空 */
+.lapsed-detail-table {
+  display: grid;
+  grid-template-columns: minmax(64px, max-content) minmax(180px, 1.2fr) minmax(110px, 0.9fr) minmax(180px, 1.4fr) minmax(120px, 1fr);
+  column-gap: 18px;
+  row-gap: 0;
+  align-items: center;
 }
+.lapsed-detail-thead,
 .lapsed-detail-row {
-  padding: 8px 10px;
-  border-radius: 4px;
-  background: rgba(255,255,255,0.03);
-  border-left: 3px solid rgba(255,180,84,0.5);
+  display: contents;
 }
-.lapsed-detail-row.is-ongoing {
-  border-left-color: #b91c1c;
-  background: rgba(185,28,28,0.10);
+.lapsed-detail-thead > div {
+  padding: 6px 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--muted);
 }
-.lapsed-detail-row-head {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-  align-items: baseline;
-  margin-bottom: 4px;
+.lapsed-detail-row > div {
+  padding: 9px 0;
+  font-variant-numeric: tabular-nums;
 }
+.lapsed-detail-row > div:first-child {
+  position: relative;
+  padding-left: 10px;
+}
+.lapsed-detail-row > div:first-child::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 9px; bottom: 9px;
+  width: 3px;
+  background: rgba(255,180,84,0.55);
+  border-radius: 2px;
+}
+.lapsed-detail-row.is-ongoing > div:first-child::before {
+  background: #b91c1c;
+}
+.lapsed-detail-row.is-ongoing > div {
+  background: rgba(185,28,28,0.06);
+}
+
 .lapsed-detail-no {
   font-weight: 600;
   color: #ffb454;
   font-size: 12px;
 }
 .lapsed-detail-row.is-ongoing .lapsed-detail-no { color: #fca5a5; }
-.lapsed-detail-range {
-  font-variant-numeric: tabular-nums;
+.lapsed-detail-range,
+.lapsed-detail-span,
+.lapsed-detail-trigger,
+.lapsed-detail-resumed {
   color: var(--text);
 }
-.lapsed-detail-span {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-  color: var(--muted);
-  font-size: 11.5px;
-}
-.lapsed-detail-row-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 11.5px;
-}
-.lapsed-detail-row-body b {
+.lapsed-detail-trigger b,
+.lapsed-detail-resumed b,
+.lapsed-detail-range b,
+.lapsed-detail-span b {
   color: var(--text);
-  font-weight: 500;
+  font-weight: 600;
 }
 .lapsed-detail-ongoing {
   color: #fca5a5;
@@ -798,10 +1502,49 @@ svg.yield-chart {
   padding: 6px 0;
 }
 .lapsed-detail-footer {
-  margin-top: 10px;
+  margin-top: 12px;
   padding-top: 8px;
-  border-top: 1px dashed rgba(255,180,84,0.25);
   font-size: 11.5px;
+}
+
+/* 窄屏退化：列堆叠成两行块状 */
+@media (max-width: 900px) {
+  .lapsed-detail-table {
+    grid-template-columns: 1fr;
+    column-gap: 0;
+    row-gap: 0;
+  }
+  .lapsed-detail-thead { display: none; }
+  .lapsed-detail-row {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 12px;
+    row-gap: 2px;
+    padding: 8px 0 8px 10px;
+    position: relative;
+  }
+  .lapsed-detail-row > div {
+    padding: 2px 0;
+    border-bottom: none;
+  }
+  .lapsed-detail-row > div:first-child {
+    grid-column: 1 / -1;
+    padding-left: 0;
+  }
+  .lapsed-detail-row > div:first-child::before { display: none; }
+  .lapsed-detail-row::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 8px; bottom: 8px;
+    width: 3px;
+    background: rgba(255,180,84,0.55);
+    border-radius: 2px;
+  }
+  .lapsed-detail-row.is-ongoing::before { background: #b91c1c; }
+  .lapsed-detail-range::before { content: "区间："; color: var(--muted); margin-right: 4px; }
+  .lapsed-detail-span::before { content: "跨度："; color: var(--muted); margin-right: 4px; }
+  .lapsed-detail-trigger::before { content: "触发："; color: var(--muted); margin-right: 4px; }
+  .lapsed-detail-resumed::before { content: "恢复："; color: var(--muted); margin-right: 4px; }
 }
 
 .muted { color: var(--muted); }
@@ -819,6 +1562,47 @@ svg.yield-chart {
 .pct-label-p50 { fill: var(--muted); }
 .pct-label-p75 { fill: rgba(74,210,126,0.95); }
 .pct-label-p90 { fill: rgba(34,197,94,1); font-weight: 600; }
+
+/* 滚动分位带（Bollinger 风格）：TTM 蓝、年化紫，外带浅、内带深、中位虚线 */
+.band-ttm-outer    { fill: rgba(78,161,255,0.16); stroke: none; }
+.band-ttm-inner    { fill: rgba(78,161,255,0.28); stroke: none; }
+.band-ttm-median   { fill: none; stroke: rgba(78,161,255,0.7);  stroke-width: 1; stroke-dasharray: 3 3; }
+.band-annual-outer { fill: rgba(192,132,252,0.16); stroke: none; }
+.band-annual-inner { fill: rgba(192,132,252,0.28); stroke: none; }
+.band-annual-median{ fill: none; stroke: rgba(192,132,252,0.7); stroke-width: 1; stroke-dasharray: 3 3; }
+
+/* 分位模式切换按钮组：紧贴图例右侧，与既有 .chart-btn 样式协调 */
+.chart-bands-toggle { display: inline-flex; gap: 4px; margin-left: 4px; }
+.chart-btn-bands { padding: 2px 8px; font-size: 12px; }
+
+/* 滚动窗口长度手动输入：紧跟在 bands-toggle 右侧，仅 rolling 模式下显示 */
+.chart-window-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  font-size: 11px;
+}
+.chart-window-label { font-size: 11px; }
+.chart-window-unit { font-size: 11px; }
+.chart-window-input {
+  width: 56px;
+  background: rgba(255,255,255,0.04);
+  color: var(--text);
+  border: none;
+  border-radius: 4px;
+  padding: 2px 4px 2px 6px;
+  font-size: 12px;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  transition: background 120ms, box-shadow 120ms;
+}
+.chart-window-input:hover { background: rgba(255,255,255,0.08); }
+.chart-window-input:focus { outline: none; background: rgba(78,161,255,0.18); box-shadow: 0 0 0 1px rgba(78,161,255,0.55); }
+/* 取消 number input 在不同浏览器下的步进按钮样式差异（保留功能但更紧凑） */
+.chart-window-input::-webkit-inner-spin-button,
+.chart-window-input::-webkit-outer-spin-button { height: 18px; }
 
 /* ---------- 图表 narrow viewport 可读性补偿 ----------
    SVG viewBox 固定 960x280；容器变窄时整体等比缩放，11px 字号实际渲染 6-7px 太小。
@@ -853,70 +1637,130 @@ svg.yield-chart {
   align-items: center;
   font-size: 11px;
   padding: 3px 8px;
-  border-radius: 10px;
+  border-radius: 6px;
   text-transform: none;
   letter-spacing: 0;
 }
-.conf-high { background: rgba(74,210,126,0.15); color: var(--good); border: 1px solid rgba(74,210,126,0.3); }
-.conf-mid  { background: rgba(255,180,84,0.15); color: var(--warn); border: 1px solid rgba(255,180,84,0.3); }
-.conf-low  { background: rgba(255,93,93,0.15); color: var(--bad); border: 1px solid rgba(255,93,93,0.3); }
+.conf-high { background: rgba(74,210,126,0.18); color: var(--good); }
+.conf-mid  { background: rgba(255,180,84,0.18); color: var(--warn); }
+.conf-low  { background: rgba(255,93,93,0.18); color: var(--bad); }
 
+/* 让左列（预估）整体撑满 .col 高度 → 与右侧 annual-grid 等高 */
+.forecast-col { flex: 1 1 auto; min-height: 0; }
 .forecast-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-}
-@media (max-width: 720px) {
-  .forecast-grid { grid-template-columns: 1fr; }
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .forecast-tier {
   background: var(--panel);
-  border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 14px 16px;
+  padding: 14px 18px;
   position: relative;
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  min-height: 0;
 }
 .forecast-tier.highlight {
-  border-color: rgba(78,161,255,0.5);
-  background: linear-gradient(180deg, rgba(78,161,255,0.08), var(--panel));
-  box-shadow: 0 0 0 1px rgba(78,161,255,0.15);
+  background: linear-gradient(180deg, rgba(78,161,255,0.16), rgba(78,161,255,0.04));
+  box-shadow: inset 0 0 0 1px rgba(78,161,255,0.28);
 }
-.tier-label {
-  font-size: 12px;
-  color: var(--muted);
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-  margin-bottom: 8px;
+.tier-head {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.tier-label {
+  text-transform: uppercase;
+  font-weight: 500;
+  letter-spacing: 0.6px;
 }
 .badge-base {
   font-size: 10px;
   padding: 1px 6px;
-  border-radius: 8px;
+  border-radius: 6px;
   background: var(--accent);
   color: #fff;
   text-transform: none;
   letter-spacing: 0;
+  line-height: 1.4;
 }
-.tier-value {
-  font-size: 22px;
+.tier-note {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.tier-metrics {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.tier-metric { display: flex; flex-direction: column; gap: 2px; }
+.tier-metric-yield { flex: 0 0 auto; min-width: 110px; }
+.tier-metric-cash  { flex: 1 1 auto; }
+.tier-metric-sep {
+  width: 1px;
+  align-self: stretch;
+  background: rgba(255,255,255,0.08);
+}
+.tier-metric-num {
+  font-size: 28px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1.1;
-  margin-bottom: 6px;
+  color: var(--text);
 }
-.tier-unit { font-size: 12px; color: var(--muted); font-weight: 400; }
-.tier-yield { font-size: 12px; margin-bottom: 4px; }
-.tier-yield b { color: var(--text); }
-.tier-note { font-size: 11px; color: var(--muted); }
+.forecast-tier.highlight .tier-metric-yield .tier-metric-num { color: var(--accent); }
+.tier-metric-unit {
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 400;
+  margin-left: 2px;
+}
+.tier-metric-cap {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+}
+@media (max-width: 720px) {
+  .tier-metrics { flex-direction: column; align-items: flex-start; gap: 8px; }
+  .tier-metric-sep { display: none; }
+  .tier-metric-num { font-size: 24px; }
+}
 
-.forecast-note { font-size: 12px; margin-top: 12px; }
+.forecast-note { font-size: 12px; margin-top: 10px; }
 
 .yoy-up   { color: var(--good); }
 .yoy-down { color: var(--bad); }
 
+/* 年度分红表：默认显示约 10 行，超出滚动；表头固定 */
+.annual-col { flex: 1 1 auto; min-height: 0; }
+.annual-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 408px; /* sticky 表头 ~32px + 10 行 ~37.5px ≈ 407 → 默认正好 10 年 */
+  overflow-y: auto;
+  border-radius: 6px;
+}
+.annual-grid::-webkit-scrollbar { width: 8px; }
+.annual-grid::-webkit-scrollbar-thumb { background: #2a2f3a; border-radius: 4px; }
+.annual-more-hint {
+  font-size: 11px;
+  margin-top: 6px;
+  text-align: right;
+  letter-spacing: 0.2px;
+}
+table.annual-table { margin: 0; }
 table.annual-table th { font-weight: 500; }
 
 /* 分红事件 */
@@ -925,8 +1769,7 @@ table.annual-table th { font-weight: 500; }
 .events-grid {
   max-height: 360px;
   overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 4px;
 }
 .events-grid::-webkit-scrollbar { width: 8px; }
 .events-grid::-webkit-scrollbar-thumb { background: #2a2f3a; border-radius: 4px; }
@@ -942,14 +1785,14 @@ table.annual-table th { font-weight: 500; }
 table.events-table {
   width: 100%;
   background: var(--panel);
-  border-radius: 6px;
+  border-radius: 4px;
   border-collapse: collapse;
+  overflow: hidden;
 }
 table.events-table th,
 table.events-table td {
   padding: 9px 12px;
   font-size: 13px;
-  border-bottom: 1px solid var(--border);
   text-align: left;
 }
 table.events-table th.num,
@@ -957,7 +1800,10 @@ table.events-table td.num {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
-table.events-table tr:last-child td { border-bottom: none; }
+/* 取代 border 行分隔：用斑马纹背景让多行依然容易扫读 */
+table.events-table tbody tr:nth-child(even) td {
+  background: rgba(255,255,255,0.025);
+}
 table.events-table th {
   background: #1c1f27;
   text-transform: none;
@@ -966,8 +1812,23 @@ table.events-table th {
   top: 0;
   z-index: 1;
 }
-table.annual-table {
-  border: 1px solid var(--border);
+
+/* 事件表中"该年度合计远高于历史中位数"的派息行 → 与卡片"含特别"标签同色调 */
+.event-unusual-tag {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 10px;
+  letter-spacing: 0.3px;
+  color: var(--warn);
+  background: rgba(255, 180, 84, 0.16);
+  border-radius: 999px;
+  padding: 1px 7px;
+  vertical-align: middle;
+  font-weight: 500;
+  cursor: help;
+}
+table.events-table tr.event-unusual-row td {
+  background: rgba(255, 180, 84, 0.04);
 }
 
 /* ---------- watchlist 编辑：modal 蒙层 + 卡片右上角操作按钮 ---------- */
@@ -989,7 +1850,7 @@ table.annual-table {
 .modal-card {
   background: var(--card-bg, #1a1d24);
   border: 1px solid var(--border, #2c303b);
-  border-radius: 10px;
+  border-radius: 6px;
   padding: 22px 24px 18px;
   width: 360px;
   max-width: calc(100vw - 32px);
@@ -1010,19 +1871,20 @@ table.annual-table {
 .modal-form input,
 .modal-form select {
   width: 100%;
-  padding: 7px 9px;
+  padding: 8px 10px;
   font-size: 14px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text);
-  border: 1px solid var(--border, #2c303b);
-  border-radius: 6px;
+  border: none;
+  border-radius: 4px;
   box-sizing: border-box;
   font-family: inherit;
+  transition: background 0.15s;
 }
 .modal-form input:focus,
 .modal-form select:focus {
   outline: none;
-  border-color: var(--accent, #4f8cff);
+  background: rgba(78, 161, 255, 0.18);
 }
 .modal-form input:disabled {
   opacity: 0.6;
@@ -1035,23 +1897,22 @@ table.annual-table {
   margin-top: 18px;
 }
 .modal-actions button {
-  padding: 7px 16px;
+  padding: 8px 16px;
   font-size: 13px;
-  border-radius: 6px;
+  border-radius: 4px;
   cursor: pointer;
   font-family: inherit;
-  border: 1px solid var(--border, #2c303b);
-  background: rgba(255, 255, 255, 0.04);
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
   color: var(--text);
   transition: background 0.15s;
 }
 .modal-actions button:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.10);
 }
 .modal-actions button.primary {
   background: var(--accent, #4f8cff);
   color: #fff;
-  border-color: var(--accent, #4f8cff);
 }
 .modal-actions button.primary:hover:not(:disabled) {
   background: #3d7af0;
@@ -1059,7 +1920,6 @@ table.annual-table {
 .modal-actions button.danger {
   background: #c04848;
   color: #fff;
-  border-color: #c04848;
 }
 .modal-actions button.danger:hover:not(:disabled) {
   background: #a83a3a;
@@ -1071,9 +1931,8 @@ table.annual-table {
 .modal-error {
   margin-top: 10px;
   padding: 8px 10px;
-  background: rgba(192, 72, 72, 0.15);
-  border: 1px solid rgba(192, 72, 72, 0.4);
-  border-radius: 6px;
+  background: rgba(192, 72, 72, 0.18);
+  border-radius: 4px;
   color: #ff8888;
   font-size: 12px;
 }
@@ -1084,41 +1943,53 @@ table.annual-table {
   line-height: 1.5;
 }
 
-/* 卡片右上角的编辑/删除小图标按钮。stopPropagation 防触发详情面板。 */
+/* 卡片右上角的编辑/删除小图标按钮。hover 时淡入。
+   .card-head 已用 padding-right 给这块区域让位，避免与名称/代码重叠。
+   stopPropagation 防触发详情面板。 */
 .card-actions {
   position: absolute;
-  top: 8px;
-  right: 8px;
+  top: 12px;
+  right: 14px;
   display: flex;
-  gap: 4px;
+  gap: 2px;
   opacity: 0;
-  transition: opacity 0.15s;
+  pointer-events: none;
+  transition: opacity 150ms;
 }
 .card:hover .card-actions {
   opacity: 1;
+  pointer-events: auto;
 }
 .card-actions .btn-icon {
-  background: rgba(0, 0, 0, 0.35);
-  color: rgba(255, 255, 255, 0.7);
-  border: 1px solid var(--border, #2c303b);
-  border-radius: 5px;
-  width: 26px;
-  height: 26px;
-  font-size: 13px;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+  border-radius: 4px;
+  width: 22px;
+  height: 22px;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  transition: background 0.15s, color 0.15s;
+  transition: background 120ms, color 120ms;
+}
+.card-actions .btn-icon svg {
+  width: 13px;
+  height: 13px;
+  display: block;
 }
 .card-actions .btn-icon:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: #fff;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
 }
 .card-actions .btn-icon.danger:hover {
-  background: rgba(192, 72, 72, 0.6);
-  color: #fff;
+  background: rgba(255, 93, 93, 0.18);
+  color: #ff8888;
+}
+.card-actions .btn-icon:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
 }
 
 /* ---------- 添加 modal 的搜索框 + autocomplete 下拉 ---------- */
@@ -1135,7 +2006,7 @@ table.annual-table {
   overflow-y: auto;
   background: var(--card-bg, #1a1d24);
   border: 1px solid var(--border, #2c303b);
-  border-radius: 6px;
+  border-radius: 4px;
   z-index: 10;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   scrollbar-width: thin;
@@ -1155,10 +2026,8 @@ table.annual-table {
   padding: 7px 10px;
   font-size: 13px;
   cursor: pointer;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
   color: var(--text);
 }
-.search-item:last-child { border-bottom: none; }
 .search-item:hover,
 .search-item.active {
   background: rgba(79, 140, 255, 0.18);
@@ -1187,9 +2056,8 @@ table.annual-table {
 .search-selected {
   margin-top: 6px;
   padding: 8px 10px;
-  background: rgba(79, 140, 255, 0.12);
-  border: 1px solid rgba(79, 140, 255, 0.3);
-  border-radius: 6px;
+  background: rgba(79, 140, 255, 0.16);
+  border-radius: 4px;
   font-size: 13px;
   display: flex;
   align-items: center;

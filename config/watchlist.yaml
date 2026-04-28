@@ -1,4 +1,4 @@
-refresh_seconds: 10
+refresh_seconds: 3
 carry_stale_days: 540
 stocks:
 - symbol: '600519'

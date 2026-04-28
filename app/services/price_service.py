@@ -79,5 +79,9 @@ class PriceService:
             if s.symbol not in merged and s.symbol in self._last_good:
                 merged[s.symbol] = self._last_good[s.symbol]
 
-        self.cache.set(_BATCH_KEY, merged)
+        # 整批失败时（fresh 为空，merged 全部来自 last_good）不缓存，
+        # 否则 5s TTL × 5s timeout 会把一次新浪抖动放大成 10s+ 全列陈旧。
+        # 不缓存 → 下个 tick 立即重试 sina；本次仍正常返回兜底数据，调用方无感。
+        if fresh:
+            self.cache.set(_BATCH_KEY, merged)
         return merged

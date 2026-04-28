@@ -8,9 +8,28 @@
 
   const NOTIFY_THRESHOLD = 90; // P 分位 ≥ 此值触发通知
   const NOTIFY_PREF_KEY = "dividend-notify-enabled";
+  const BANDS_PREF_KEY = "dividend-chart-bands-mode"; // "static" | "rolling"，默认 rolling
+  const LINES_PREF_KEY = "dividend-chart-lines-visibility"; // 折线/分位线可见性偏好
+  const DEFAULT_LINE_VIS = {
+    ttm: true, annual: true, price: true,
+    // 静态分位水平线：四档独立开关
+    p25: true, p50: true, p75: true, p90: true,
+    // 滚动带：3 个视觉组件（外带 P10–P90 / 内带 P25–P75 / 中位 P50），合并开关
+    band_outer: true, band_inner: true, band_median: true,
+  };
+  // 滚动分位窗口长度（年），默认 3 年（与后端 _ROLLING_WINDOW_DAYS = 750 对齐）
+  // 改这个值会触发前端 computeRollingBands 重算，覆盖 API 返回的预算 bands
+  const WINDOW_PREF_KEY = "dividend-chart-rolling-window-years";
+  const DEFAULT_WINDOW_YEARS = 3;
+  const TRADING_DAYS_PER_YEAR = 250;
+  const ROLLING_PCTS = [10, 25, 50, 75, 90];
   const expanded = new Map(); // symbol -> { detailEl, abortController, liveTimer }
   // 已通知过的 symbol 集合，避免同会话内重复弹窗（每次进入"低估"区只通知 1 次）
   const notifiedAlerts = new Set();
+
+  // 编辑模式：顶部"编辑"按钮触发；普通点击=展开详情，编辑模式下=切换勾选
+  let editMode = false;
+  const selectedSymbols = new Set();
 
   function fmtNumber(v, digits) {
     if (v === null || v === undefined) return "—";
@@ -53,27 +72,18 @@
     return lagSec > refreshSeconds * 1.5;
   }
 
-  // 卡片"现价"格内 HTML：陈旧时附带 ⏱ HH:MM:SS 水印，鼠标悬停看完整说明
+  // 卡片"现价"格内 HTML。
+  // 注：单行不再展示 ⏱ HH:MM:SS 拉取失败水印；陈旧状态由右上角全局 statusDot 聚合提示。
   function priceCellHtml(row) {
     if (row.price === null || row.price === undefined) return "¥—";
-    const base = `¥${fmtPrice(row.price, 2)}`;
-    if (!isPriceStale(row)) return base;
-    const t = fmtTime(row.price_ts);
-    return `${base}<span class="stale-tag" title="行情拉取失败，仍显示 ${t} 的实盘价；下次刷新自动恢复">⏱ ${t}</span>`;
+    return `¥${fmtPrice(row.price, 2)}`;
   }
 
-  // 详情面板"当前价"后缀：实时正常 → 空；昨收兜底 → （昨收）；行情陈旧 → ⏱ HH:MM:SS
+  // 详情面板"当前价"后缀：仅区分昨收兜底，不再为陈旧行情打 ⏱ 标签。
   function liveSourceHtml(current) {
     if (!current) return "";
     if (current.source !== "live") {
       return '<span class="live-source muted">（昨收）</span>';
-    }
-    if (current.live_ts) {
-      const lagSec = (Date.now() - Date.parse(current.live_ts)) / 1000;
-      if (lagSec > refreshSeconds * 1.5) {
-        const t = fmtTime(current.live_ts);
-        return ` <span class="stale-tag" title="行情拉取失败，仍显示 ${t} 的实盘价；下次刷新自动恢复">⏱ ${t}</span>`;
-      }
     }
     return "";
   }
@@ -90,43 +100,133 @@
     return `<span class="badge ${valuationClass(label)} val-badge" title="${tooltip}"><span class="val-tier">${tier}</span>P${Math.round(rank)} · ${label}</span>`;
   }
 
-  // 估值徽章组：年化在上、TTM 在下，两套口径并列展示。
+  // 卡片大字口径选择：取年化/TTM 中数值较低者作为主指标（更稳健的视角，不被特别股利抬高）。
+  // 两者皆缺失返回 null；只有一个就用那个；相等时默认 annual（避免 tie 时 UI 反复切换）。
+  function pickPrimaryYieldKind(row) {
+    const a = row.yield_pct;
+    const t = row.yield_ttm_pct;
+    const aOk = a !== null && a !== undefined;
+    const tOk = t !== null && t !== undefined;
+    if (!aOk && !tOk) return null;
+    if (!aOk) return "ttm";
+    if (!tOk) return "annual";
+    return t < a ? "ttm" : "annual";
+  }
+
+  // 卡片单徽章：只渲染主指标对应的分位/估值，避免年化+TTM 双行徽章过于拥挤。
   function valuationBadgeHtml(row) {
-    const annual = singleBadgeHtml(
+    const primary = pickPrimaryYieldKind(row) || "annual";
+    if (primary === "ttm") {
+      return singleBadgeHtml(
+        "TTM",
+        row.percentile_rank,
+        row.valuation,
+        "TTM 口径分位：当前 TTM 股息率在历史样本中的位置"
+      );
+    }
+    return singleBadgeHtml(
       "年化",
       row.annual_percentile_rank,
       row.annual_valuation,
       "年化口径分位：当前年化股息率在历史样本中的位置"
     );
-    const ttm = singleBadgeHtml(
-      "TTM",
+  }
+
+  // 列表视图专用：分位单独一列。
+  // 数字像「年化%」那样平铺呈现，估值状态由一个小圆点 icon 表示，
+  // 颜色含义在页脚 legend 里说明（5 档统一）。鼠标 hover 看完整文字。
+  function tierStatusCellHtml(rank, label, tooltipPrefix) {
+    if (rank === null || rank === undefined) {
+      return `<span class="lr-tier"><span class="lr-tier-text muted">—</span></span>`;
+    }
+    const cls = valuationClass(label);
+    const dotTitle = label ? `${tooltipPrefix} · 当前 ${label}` : tooltipPrefix;
+    const num = `<span class="lr-tier-text" title="${tooltipPrefix}">P${Math.round(rank)}</span>`;
+    const dot = `<span class="lr-status-dot ${cls}" title="${dotTitle}" aria-label="${label || ""}"></span>`;
+    return `<span class="lr-tier">${num}${dot}</span>`;
+  }
+  function valuationAnnualCellHtml(row) {
+    return tierStatusCellHtml(
+      row.annual_percentile_rank,
+      row.annual_valuation,
+      "年化口径分位：当前年化股息率在历史样本中的位置"
+    );
+  }
+  function valuationTtmCellHtml(row) {
+    return tierStatusCellHtml(
       row.percentile_rank,
       row.valuation,
       "TTM 口径分位：当前 TTM 股息率在历史样本中的位置"
     );
-    return `<span class="valuation-stack">${annual}${ttm}</span>`;
   }
 
   function yieldHtml(row) {
+    const primary = pickPrimaryYieldKind(row);
+    if (primary === null) {
+      return `<span class="card-yield-error">${row.error || "—"}</span>`;
+    }
+    const annual = row.yield_pct;
+    const ttm = row.yield_ttm_pct;
+    const annualOk = annual !== null && annual !== undefined;
+    const ttmOk = ttm !== null && ttm !== undefined;
+    const unusual = row.annual_unusually_high === true;
+    const dy = row.dividend_year ?? "—";
+    const annualTitle = unusual
+      ? `派息年 ${dy} 合计明显高于历史中位数（含特别股利或节奏过渡），不代表常态化股息率`
+      : `年化 = 派息年 ${dy} 累计每股 ÷ 实时价`;
+    const ttmTitle = "TTM = 过去 365 天实际除权金额 ÷ 实时价";
+
+    function bigLine(kind) {
+      if (kind === "annual") {
+        const tagClass = unusual ? "card-yield-tag warn" : "card-yield-tag";
+        const tagText = unusual ? "含特别 ⚠" : "年化";
+        return `<span class="card-yield ${yieldClass(annual)}" title="${annualTitle}">${fmtNumber(annual, 2)}<span class="unit">%</span><span class="${tagClass}">${tagText}</span></span>`;
+      }
+      return `<span class="card-yield ${yieldClass(ttm)}" title="${ttmTitle}">${fmtNumber(ttm, 2)}<span class="unit">%</span><span class="card-yield-tag">TTM</span></span>`;
+    }
+
+    function smallLine(kind) {
+      if (kind === "annual") {
+        if (!annualOk) return "";
+        const warn = unusual
+          ? ` <span class="card-yield-tag warn">含特别 ⚠</span>`
+          : "";
+        return `<span class="card-yield-ttm ${yieldClass(annual)}" title="${annualTitle}">年化 ${fmtNumber(annual, 2)}<span class="unit-sm">%</span>${warn}</span>`;
+      }
+      if (!ttmOk) return "";
+      return `<span class="card-yield-ttm ${yieldClass(ttm)}" title="${ttmTitle}">TTM ${fmtNumber(ttm, 2)}<span class="unit-sm">%</span></span>`;
+    }
+
+    const secondaryKind = primary === "annual" ? "ttm" : "annual";
+    return `
+      <span class="card-yield-stack">
+        ${bigLine(primary)}
+        ${smallLine(secondaryKind)}
+      </span>`;
+  }
+
+  // 列表视图专用：年化股息率单独一列。
+  // "含特别" 改成纯图标 + hover tooltip，避免在窄列里挤占空间。
+  function yieldAnnualCellHtml(row) {
     if (row.yield_pct === null || row.yield_pct === undefined) {
       return `<span class="card-yield-error">${row.error || "—"}</span>`;
     }
-    const ttm = row.yield_ttm_pct;
-    const ttmHtml =
-      ttm === null || ttm === undefined
-        ? '<span class="card-yield-ttm muted">TTM —</span>'
-        : `<span class="card-yield-ttm ${yieldClass(ttm)}" title="TTM = 过去 365 天实际除权金额 ÷ 实时价">TTM ${fmtNumber(ttm, 2)}<span class="unit-sm">%</span></span>`;
     const unusual = row.annual_unusually_high === true;
-    const tagClass = unusual ? "card-yield-tag warn" : "card-yield-tag";
-    const tagText = unusual ? "含特别 ⚠" : "年化";
-    const yieldTitle = unusual
-      ? `派息年 ${row.dividend_year ?? "—"} 合计明显高于历史中位数（含特别股利或节奏过渡），不代表常态化股息率`
-      : `年化 = 派息年 ${row.dividend_year ?? "—"} 累计每股 ÷ 实时价`;
-    return `
-      <span class="card-yield-stack">
-        <span class="card-yield ${yieldClass(row.yield_pct)}" title="${yieldTitle}">${fmtNumber(row.yield_pct, 2)}<span class="unit">%</span><span class="${tagClass}">${tagText}</span></span>
-        ${ttmHtml}
-      </span>`;
+    const yieldTitle = `年化 = 派息年 ${row.dividend_year ?? "—"} 累计每股 ÷ 实时价`;
+    const warnTitle = `派息年 ${row.dividend_year ?? "—"} 合计明显高于历史中位数（含特别股利或节奏过渡），不代表常态化股息率`;
+    const warnIcon = unusual
+      ? `<span class="lr-warn-icon" title="${warnTitle}" aria-label="含特别股利警告">⚠</span>`
+      : "";
+    return `<span class="card-yield ${yieldClass(row.yield_pct)}" title="${unusual ? warnTitle : yieldTitle}">${fmtNumber(row.yield_pct, 2)}<span class="unit">%</span></span>${warnIcon}`;
+  }
+
+  // 列表视图专用：TTM 股息率单独一列。
+  function yieldTtmCellHtml(row) {
+    const ttm = row.yield_ttm_pct;
+    if (ttm === null || ttm === undefined) {
+      return `<span class="card-yield-ttm muted">—</span>`;
+    }
+    return `<span class="card-yield-ttm ${yieldClass(ttm)}" title="TTM = 过去 365 天实际除权金额 ÷ 实时价">${fmtNumber(ttm, 2)}<span class="unit-sm">%</span></span>`;
   }
 
   function positionHtml(row) {
@@ -140,6 +240,7 @@
   }
 
   function buildCard(row) {
+    if (viewMode === "list") return buildListRow(row);
     const card = document.createElement("article");
     card.id = cardKey(row);
     card.dataset.symbol = row.symbol;
@@ -149,9 +250,17 @@
     }
     card.innerHTML = `
       <div class="card-actions">
-        <button type="button" class="btn-icon" data-act="edit" title="编辑">✏️</button>
-        <button type="button" class="btn-icon danger" data-act="delete" title="删除">🗑️</button>
+        <button type="button" class="btn-icon" data-act="edit" title="编辑" aria-label="编辑">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>
+        </button>
+        <button type="button" class="btn-icon danger" data-act="delete" title="删除" aria-label="删除">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+        </button>
       </div>
+      <label class="select-checkbox card-select" aria-hidden="true" tabindex="-1">
+        <input type="checkbox" data-act="select" tabindex="-1" />
+        <span class="select-box"></span>
+      </label>
       <div class="card-head">
         <div class="card-name">${row.name}</div>
         <div class="card-symbol">${row.symbol}</div>
@@ -168,19 +277,60 @@
       ${positionHtml(row)}
       <div class="card-time" data-field="time">${fmtTime(row.updated_at)}</div>
     `;
-    card.addEventListener("click", (e) => {
-      // 卡片右上角操作按钮：阻止冒泡到详情面板展开
-      const actBtn = e.target.closest('[data-act]');
-      if (actBtn) {
-        e.stopPropagation();
-        const act = actBtn.dataset.act;
-        if (act === "edit") openEditModal(row);
-        else if (act === "delete") openDeleteModal(row);
-        return;
-      }
-      toggleDetail(row.symbol, row.name);
-    });
+    card.addEventListener("click", (e) => handleCardClick(e, row));
     return card;
+  }
+
+  // 列表行 / 卡片共用的点击分派：
+  //   - 编辑模式：忽略 detail，单击切换勾选；也阻断单股 edit/delete 按钮（仍 stopPropagation）
+  //   - 普通模式：按钮触发对应 modal，否则展开详情
+  function handleCardClick(e, row) {
+    const actBtn = e.target.closest('[data-act]');
+    if (editMode) {
+      // 编辑模式下整张卡/行视为一块勾选区；按钮和 input 都不再单独响应（避免误操作）
+      if (actBtn) e.stopPropagation();
+      toggleSelected(row.symbol);
+      return;
+    }
+    if (actBtn) {
+      e.stopPropagation();
+      const act = actBtn.dataset.act;
+      if (act === "edit") openEditModal(row);
+      else if (act === "delete") openDeleteModal(row);
+      return;
+    }
+    toggleDetail(row.symbol, row.name);
+  }
+
+  function buildListRow(row) {
+    const el = document.createElement("article");
+    el.id = cardKey(row);
+    el.dataset.symbol = row.symbol;
+    el.classList.add("list-row");
+    if (row.error && row.price === null && row.dividend === null) {
+      el.classList.add("error");
+    }
+    el.innerHTML = `
+      <div class="lr-name">
+        <label class="select-checkbox" aria-hidden="true" tabindex="-1">
+          <input type="checkbox" data-act="select" tabindex="-1" />
+          <span class="select-box"></span>
+        </label>
+        <div class="lr-name-text">
+          <span class="lr-stock">${row.name}</span>
+          <span class="lr-symbol">${row.symbol}</span>
+        </div>
+      </div>
+      <div class="lr-cell" data-field="yield-annual">${yieldAnnualCellHtml(row)}</div>
+      <div class="lr-cell" data-field="yield-ttm">${yieldTtmCellHtml(row)}</div>
+      <div class="lr-cell" data-field="valuation-annual">${valuationAnnualCellHtml(row)}</div>
+      <div class="lr-cell lr-hide-md" data-field="valuation-ttm">${valuationTtmCellHtml(row)}</div>
+      <div class="lr-cell" data-field="price">${priceCellHtml(row)}</div>
+      <div class="lr-cell"><b data-field="dividend">¥${fmtPrice(row.dividend, 4)}</b></div>
+      <div class="lr-cell lr-hide-sm"><b data-field="year">${row.dividend_year ?? "—"}</b></div>
+    `;
+    el.addEventListener("click", (e) => handleCardClick(e, row));
+    return el;
   }
 
   function updateCard(card, row) {
@@ -200,25 +350,46 @@
       }
     };
 
-    setHtml('[data-field="yield"]', yieldHtml(row));
-    setHtml('[data-field="valuation"]', valuationBadgeHtml(row));
+    // 卡片视图：合并的 yield / valuation
+    if (card.querySelector('[data-field="yield"]')) {
+      setHtml('[data-field="yield"]', yieldHtml(row));
+    }
+    if (card.querySelector('[data-field="valuation"]')) {
+      setHtml('[data-field="valuation"]', valuationBadgeHtml(row));
+    }
+    // 列表视图：拆分后的四个独立列
+    if (card.querySelector('[data-field="yield-annual"]')) {
+      setHtml('[data-field="yield-annual"]', yieldAnnualCellHtml(row));
+    }
+    if (card.querySelector('[data-field="yield-ttm"]')) {
+      setHtml('[data-field="yield-ttm"]', yieldTtmCellHtml(row));
+    }
+    if (card.querySelector('[data-field="valuation-annual"]')) {
+      setHtml('[data-field="valuation-annual"]', valuationAnnualCellHtml(row));
+    }
+    if (card.querySelector('[data-field="valuation-ttm"]')) {
+      setHtml('[data-field="valuation-ttm"]', valuationTtmCellHtml(row));
+    }
     setHtml('[data-field="price"]', priceCellHtml(row));
     setText('[data-field="dividend"]', "¥" + fmtPrice(row.dividend, 4));
     setText('[data-field="year"]', row.dividend_year ?? "—");
     setText('[data-field="time"]', fmtTime(row.updated_at));
 
-    // 持仓块需要整体替换（内含多元素）
-    const existingPos = card.querySelector('[data-field="position"]');
-    const newPos = positionHtml(row);
-    if (existingPos && !newPos) {
-      existingPos.remove();
-      changed = true;
-    } else if (!existingPos && newPos) {
-      card.querySelector(".card-time").insertAdjacentHTML("beforebegin", newPos);
-      changed = true;
-    } else if (existingPos && newPos && existingPos.outerHTML !== newPos) {
-      existingPos.outerHTML = newPos;
-      changed = true;
+    // 持仓块需要整体替换（内含多元素）—— 仅卡片视图渲染（list-row 没有 .card-time）
+    const cardTime = card.querySelector(".card-time");
+    if (cardTime) {
+      const existingPos = card.querySelector('[data-field="position"]');
+      const newPos = positionHtml(row);
+      if (existingPos && !newPos) {
+        existingPos.remove();
+        changed = true;
+      } else if (!existingPos && newPos) {
+        cardTime.insertAdjacentHTML("beforebegin", newPos);
+        changed = true;
+      } else if (existingPos && newPos && existingPos.outerHTML !== newPos) {
+        existingPos.outerHTML = newPos;
+        changed = true;
+      }
     }
 
     if (changed) {
@@ -228,11 +399,17 @@
     }
   }
 
-  // -------------------- 排序 --------------------
+  // -------------------- 排序 + 视图 --------------------
 
-  // 默认按股息率降序
-  let sortKey = "yield_pct";
-  let sortDesc = true;
+  const SORT_KEY_PREF = "dividend-sort-key";
+  const SORT_DIR_PREF = "dividend-sort-desc";
+  const VIEW_MODE_PREF = "dividend-view-mode";
+  const TEXT_SORT_KEYS = ["symbol", "name"];
+
+  // 默认按年化股息率降序
+  let sortKey = localStorage.getItem(SORT_KEY_PREF) || "yield_pct";
+  let sortDesc = localStorage.getItem(SORT_DIR_PREF) !== "false";
+  let viewMode = localStorage.getItem(VIEW_MODE_PREF) === "list" ? "list" : "cards";
   let lastRows = [];
 
   function compareRows(a, b) {
@@ -250,35 +427,118 @@
   }
 
   function setupSortToolbar() {
-    const pills = document.querySelectorAll("#sort-bar .sort-pill");
-    pills.forEach((pill) => {
-      pill.addEventListener("click", () => {
-        const key = pill.dataset.sort;
-        if (sortKey === key) {
-          sortDesc = !sortDesc;
-        } else {
-          sortKey = key;
-          // 文本列默认升序，数字/年度默认降序
-          sortDesc = !["symbol", "name"].includes(key);
-        }
+    const select = document.getElementById("sort-key");
+    const dirBtn = document.getElementById("sort-dir");
+    const viewToggle = document.getElementById("view-toggle");
+
+    if (select) {
+      select.value = sortKey;
+      select.addEventListener("change", () => {
+        sortKey = select.value;
+        sortDesc = !TEXT_SORT_KEYS.includes(sortKey);
+        persistSortPrefs();
         updateSortIndicators();
         if (lastRows.length) render(lastRows);
       });
-    });
+    }
+    if (dirBtn) {
+      dirBtn.addEventListener("click", () => {
+        sortDesc = !sortDesc;
+        persistSortPrefs();
+        updateSortIndicators();
+        if (lastRows.length) render(lastRows);
+      });
+    }
+    if (viewToggle) {
+      viewToggle.querySelectorAll(".view-btn").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const mode = btn.dataset.view;
+          if (mode && mode !== viewMode) {
+            switchViewMode(mode);
+          }
+        });
+      });
+    }
+    applyViewMode();
     updateSortIndicators();
   }
 
+  function persistSortPrefs() {
+    localStorage.setItem(SORT_KEY_PREF, sortKey);
+    localStorage.setItem(SORT_DIR_PREF, String(sortDesc));
+  }
+
   function updateSortIndicators() {
-    document.querySelectorAll("#sort-bar .sort-pill").forEach((pill) => {
-      const isActive = pill.dataset.sort === sortKey;
-      pill.classList.toggle("active", isActive);
-      pill.classList.toggle("sort-asc", isActive && !sortDesc);
+    const dirBtn = document.getElementById("sort-dir");
+    if (dirBtn) {
+      dirBtn.textContent = sortDesc ? "▼" : "▲";
+      dirBtn.title = sortDesc ? "当前：降序（点击切换升序）" : "当前：升序（点击切换降序）";
+    }
+  }
+
+  function listHeaderHtml() {
+    return `
+      <div class="list-header">
+        <div class="lh-cell lh-name">股票</div>
+        <div class="lh-cell" title="年化股息率：派息年累计每股 ÷ 实时价">年化%</div>
+        <div class="lh-cell" title="TTM 股息率：过去 365 天实际除权金额 ÷ 实时价">TTM%</div>
+        <div class="lh-cell" title="年化口径分位 + 高低估状态">年化分位</div>
+        <div class="lh-cell lr-hide-md" title="TTM 口径分位 + 高低估状态">TTM 分位</div>
+        <div class="lh-cell">现价</div>
+        <div class="lh-cell">每股</div>
+        <div class="lh-cell lr-hide-sm">派息年</div>
+      </div>
+    `;
+  }
+
+  function ensureListHeader() {
+    let header = cardsGrid.querySelector(":scope > .list-header");
+    if (viewMode === "list") {
+      if (!header) {
+        cardsGrid.insertAdjacentHTML("afterbegin", listHeaderHtml());
+      }
+    } else if (header) {
+      header.remove();
+    }
+  }
+
+  function applyViewMode() {
+    cardsGrid.classList.toggle("view-list", viewMode === "list");
+    document.querySelectorAll("#view-toggle .view-btn").forEach((btn) => {
+      btn.classList.toggle("active", btn.dataset.view === viewMode);
     });
+    ensureListHeader();
+  }
+
+  function switchViewMode(mode) {
+    // 切换前先关闭所有展开的详情面板（避免两种布局间的视觉错位）
+    Array.from(expanded.keys()).forEach((symbol) => {
+      const ctx = expanded.get(symbol);
+      ctx.abortController.abort();
+      if (ctx.liveTimer) clearInterval(ctx.liveTimer);
+      ctx.detailEl.remove();
+      expanded.delete(symbol);
+    });
+    // 清空所有卡片/行，重新渲染
+    cardsGrid.innerHTML = "";
+    viewMode = mode;
+    localStorage.setItem(VIEW_MODE_PREF, viewMode);
+    applyViewMode();
+    if (lastRows.length) render(lastRows);
   }
 
   function render(rows) {
     lastRows = rows;
     const sorted = [...rows].sort(compareRows);
+    // watchlist 中已不存在的 symbol 从勾选集中剔除（外部删除 / 批量删除后回流）
+    const live = new Set(sorted.map((r) => r.symbol));
+    Array.from(selectedSymbols).forEach((s) => {
+      if (!live.has(s)) selectedSymbols.delete(s);
+    });
+    // DOM 中已不存在于 rows 的卡片直接移除（批量删除后立即生效，不必等到下一 tick）
+    cardsGrid.querySelectorAll(".card, .list-row").forEach((el) => {
+      if (el.dataset.symbol && !live.has(el.dataset.symbol)) el.remove();
+    });
     // 创建/更新卡片
     sorted.forEach((row) => {
       const existing = document.getElementById(cardKey(row));
@@ -287,9 +547,12 @@
       } else {
         const loading = cardsGrid.querySelector(".cards-loading");
         if (loading) loading.remove();
-        cardsGrid.appendChild(buildCard(row));
+        const fresh = buildCard(row);
+        cardsGrid.appendChild(fresh);
+        syncCardSelection(fresh, row.symbol);
       }
     });
+    if (editMode) updateEditToolbarCount();
     // 重排 DOM：每张卡片后跟随其 detail（如已展开）
     sorted.forEach((row) => {
       const card = document.getElementById(cardKey(row));
@@ -502,45 +765,52 @@
     const intro = `
       <div class="lapsed-detail-intro">
         判定规则：相邻两次除权之间间隔超过 <b>${threshold}</b> 天的区间，视为一段"派息断流"。
-        TTM 在断流期间会被强制置 0（因为窗口里确实没有真实分红支撑）；图上对应位置以断点呈现。
+        TTM 在断流期间会被强制置 0（因为窗口里没有真实分红支撑）；折线图上对应位置以断点呈现。
       </div>`;
 
     if (segments.length === 0) {
       return `<div class="lapsed-detail-panel" hidden>${intro}<div class="lapsed-detail-empty muted">未取到段明细。</div></div>`;
     }
 
+    const headerRow = `
+      <div class="lapsed-detail-thead">
+        <div>段号</div>
+        <div>起止区间</div>
+        <div>跨度</div>
+        <div>触发（上一次派息）</div>
+        <div>恢复（重启派息）</div>
+      </div>`;
+
     const rows = segments
       .map((seg, i) => {
-        const span = seg.days !== null && seg.days !== undefined
-          ? `${seg.days} 天 (≈${(seg.days / 365).toFixed(1)} 年)`
+        const days = seg.days;
+        const spanCell = (days !== null && days !== undefined)
+          ? `<b>${days}</b> <span class="muted">天 (≈${(days / 365).toFixed(1)} 年)</span>`
           : "—";
-        const triggerTxt = seg.prev_ex_date
-          ? `上一次派息 <b>${escapeHtml(seg.prev_ex_date)}</b> 后超过 ${threshold} 天再无新分红`
-          : "首次除权前无历史分红";
-        const resumedTxt = seg.ongoing
+        const triggerCell = seg.prev_ex_date
+          ? `<b>${escapeHtml(seg.prev_ex_date)}</b> <span class="muted">+ ${threshold} 天未派息</span>`
+          : `<span class="muted">首次除权前</span>`;
+        const resumedCell = seg.ongoing
           ? `<span class="lapsed-detail-ongoing">⚠ 至今未恢复</span>`
           : seg.resumed_ex_date
-            ? `直到 <b>${escapeHtml(seg.resumed_ex_date)}</b> 才重启派息`
+            ? `<b>${escapeHtml(seg.resumed_ex_date)}</b>`
             : "—";
+        const rangeCell = `${escapeHtml(seg.start_date || "—")} <span class="muted">→</span> ${escapeHtml(seg.end_date || "—")}`;
         return `
-          <li class="lapsed-detail-row${seg.ongoing ? " is-ongoing" : ""}">
-            <div class="lapsed-detail-row-head">
-              <span class="lapsed-detail-no">第 ${i + 1} 段</span>
-              <span class="lapsed-detail-range">${escapeHtml(seg.start_date || "—")} → ${escapeHtml(seg.end_date || "—")}</span>
-              <span class="lapsed-detail-span">${span}</span>
-            </div>
-            <div class="lapsed-detail-row-body muted">
-              <div>触发：${triggerTxt}</div>
-              <div>恢复：${resumedTxt}</div>
-            </div>
-          </li>`;
+          <div class="lapsed-detail-row${seg.ongoing ? " is-ongoing" : ""}">
+            <div class="lapsed-detail-no">第 ${i + 1} 段</div>
+            <div class="lapsed-detail-range">${rangeCell}</div>
+            <div class="lapsed-detail-span">${spanCell}</div>
+            <div class="lapsed-detail-trigger">${triggerCell}</div>
+            <div class="lapsed-detail-resumed">${resumedCell}</div>
+          </div>`;
       })
       .join("");
 
     return `
       <div class="lapsed-detail-panel" hidden>
         ${intro}
-        <ol class="lapsed-detail-list">${rows}</ol>
+        <div class="lapsed-detail-table">${headerRow}${rows}</div>
         <div class="lapsed-detail-footer muted">
           数据来源：本地按交易日逐日扫描的 TTM series（source=lapsed 的连续段），与上方折线图断点一一对应。
         </div>
@@ -679,7 +949,12 @@
     const chartWrap = detailRow.querySelector(".chart-wrap");
     chartWrap.innerHTML = "";
     if (series.length > 0) {
-      chartWrap.appendChild(buildChart(series, percentiles, annualSeries).element);
+      chartWrap.appendChild(
+        buildChart(series, percentiles, annualSeries, {
+          bands: data.bands || [],
+          annualBands: data.annual_bands || [],
+        }).element
+      );
     } else {
       chartWrap.innerHTML = `<div class="chart-error">没有历史数据</div>`;
     }
@@ -697,13 +972,16 @@
     const eventsWrap = detailRow.querySelector(".events-wrap");
     if (events.length) {
       const rows = events
-        .map(
-          (e) =>
-            `<tr><td>${e.ex_date}</td><td class="num">${fmtNumber(
-              e.cash_per_share,
-              4
-            )}</td></tr>`
-        )
+        .map((e) => {
+          const tag = e.unusual
+            ? ` <span class="event-unusual-tag" title="该派息年合计较历史中位数高 ≥50%（含特别股利或节奏过渡），不代表常态化股息率">含特别 ⚠</span>`
+            : "";
+          const trCls = e.unusual ? ' class="event-unusual-row"' : "";
+          return `<tr${trCls}><td>${e.ex_date}${tag}</td><td class="num">${fmtNumber(
+            e.cash_per_share,
+            4
+          )}</td></tr>`;
+        })
         .join("");
       eventsWrap.innerHTML = `
         <h3 class="section-title">历史分红事件 <span class="muted">(共 ${events.length} 次)</span></h3>
@@ -732,30 +1010,36 @@
         forecast.confidence
       ] || "";
 
+    const tier = (cls, label, badge, cash, note) => `
+      <div class="forecast-tier ${cls}">
+        <div class="tier-head">
+          <span class="tier-label">${label}</span>
+          ${badge ? `<span class="badge-base">${badge}</span>` : ""}
+          <span class="tier-note">${note}</span>
+        </div>
+        <div class="tier-metrics">
+          <div class="tier-metric tier-metric-yield">
+            <div class="tier-metric-num">${projYield(cash)}</div>
+            <div class="tier-metric-cap">按现价折算</div>
+          </div>
+          <div class="tier-metric-sep"></div>
+          <div class="tier-metric tier-metric-cash">
+            <div class="tier-metric-num">${fmtNumber(cash, 2)}<span class="tier-metric-unit"> 元/股</span></div>
+            <div class="tier-metric-cap">预估分红</div>
+          </div>
+        </div>
+      </div>
+    `;
+
     return `
       <h3 class="section-title">
         ${forecast.next_year} 年分红预估
         <span class="conf-pill ${confClass}">置信度 ${conf}</span>
       </h3>
       <div class="forecast-grid">
-        <div class="forecast-tier conservative">
-          <div class="tier-label">保守</div>
-          <div class="tier-value">${fmtNumber(forecast.conservative, 2)} <span class="tier-unit">元/股</span></div>
-          <div class="tier-yield muted">按现价 ${projYield(forecast.conservative)}</div>
-          <div class="tier-note">与去年持平</div>
-        </div>
-        <div class="forecast-tier mid highlight">
-          <div class="tier-label">中位 <span class="badge-base">推荐</span></div>
-          <div class="tier-value">${fmtNumber(forecast.mid, 2)} <span class="tier-unit">元/股</span></div>
-          <div class="tier-yield">按现价 <b>${projYield(forecast.mid)}</b></div>
-          <div class="tier-note">近 3 年均速 ${fmtNumber(forecast.avg_yoy_3y, 1)}%</div>
-        </div>
-        <div class="forecast-tier optimistic">
-          <div class="tier-label">乐观</div>
-          <div class="tier-value">${fmtNumber(forecast.optimistic, 2)} <span class="tier-unit">元/股</span></div>
-          <div class="tier-yield muted">按现价 ${projYield(forecast.optimistic)}</div>
-          <div class="tier-note">近 3 年最高 YoY</div>
-        </div>
+        ${tier("conservative", "保守", "", forecast.conservative, "与去年持平")}
+        ${tier("mid highlight", "中位", "推荐", forecast.mid, `近 3 年均速 ${fmtNumber(forecast.avg_yoy_3y, 1)}%`)}
+        ${tier("optimistic", "乐观", "", forecast.optimistic, "近 3 年最高 YoY")}
       </div>
       <div class="forecast-note muted">
         基线 ${forecast.based_on_year} 年实派 ${fmtNumber(forecast.based_on_total, 4)} 元/股
@@ -767,7 +1051,6 @@
     if (!annual.length) return "";
     const rows = [...annual]
       .reverse()
-      .slice(0, 10)
       .map((a) => {
         const yoyCell =
           a.yoy_pct === null
@@ -781,12 +1064,19 @@
         )}</td><td class="num">${yoyCell}</td></tr>`;
       })
       .join("");
+    const moreHint =
+      annual.length > 10
+        ? `<div class="annual-more-hint muted">默认显示最近 10 年，向下滑动查看更早年度</div>`
+        : "";
     return `
       <h3 class="section-title">年度分红 <span class="muted">(每股合计)</span></h3>
-      <table class="events-table annual-table">
-        <thead><tr><th>年度</th><th class="num">每股 (元)</th><th class="num">同比</th></tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
+      <div class="annual-grid">
+        <table class="events-table annual-table">
+          <thead><tr><th>年度</th><th class="num">每股 (元)</th><th class="num">同比</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      ${moreHint}
     `;
   }
 
@@ -805,6 +1095,85 @@
     return p[4] || "window"; // 兼容旧 4 元素 series
   }
 
+  // ---------- JS 版滚动分位带 ----------
+  // 镜像 history_service.py:compute_rolling_bands。仅当用户改了窗口长度时才在前端重算，
+  // 默认 3 年直接用 API 返回的 bands（首屏零计算）。
+  // O(n × log w + n × w) — 6651×750 实测 ~150ms，可接受。
+  function _insortAsc(arr, x) {
+    let lo = 0, hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid] < x) lo = mid + 1; else hi = mid;
+    }
+    arr.splice(lo, 0, x);
+  }
+  function _bisectLeftJs(arr, x) {
+    let lo = 0, hi = arr.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (arr[mid] < x) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  }
+  function _interpPctRow(sortedWindow) {
+    const m = sortedWindow.length;
+    return ROLLING_PCTS.map((pct) => {
+      const rank = (pct / 100) * (m - 1);
+      const lo = Math.floor(rank);
+      const hi = Math.min(lo + 1, m - 1);
+      const frac = rank - lo;
+      return Math.round((sortedWindow[lo] * (1 - frac) + sortedWindow[hi] * frac) * 100) / 100;
+    });
+  }
+  function _computeRollingBandsCore(items, windowDays, minSamples, isValidSample) {
+    const n = items.length;
+    const out = [];
+    const sortedWindow = [];
+    const fifo = []; // {idx, val|null}，按插入序
+    let head = 0;
+    for (let i = 0; i < n; i++) {
+      const p = items[i];
+      const ypct = p && p.length >= 4 ? p[3] : null;
+      const ok = ypct != null && ypct > 0 && isValidSample(p);
+      if (ok) {
+        _insortAsc(sortedWindow, ypct);
+        fifo.push({ idx: i, val: ypct });
+      } else {
+        fifo.push({ idx: i, val: null });
+      }
+      const cutoff = i - windowDays + 1;
+      while (head < fifo.length && fifo[head].idx < cutoff) {
+        const old = fifo[head];
+        head++;
+        if (old.val != null) {
+          const j = _bisectLeftJs(sortedWindow, old.val);
+          if (j < sortedWindow.length && sortedWindow[j] === old.val) {
+            sortedWindow.splice(j, 1);
+          }
+        }
+      }
+      if (sortedWindow.length < minSamples) {
+        out.push([null, null, null, null, null]);
+      } else {
+        out.push(_interpPctRow(sortedWindow));
+      }
+    }
+    return out;
+  }
+  // TTM series 元素 [date, close, ttm_dividend, yield_pct, source]：仅 source==="window" 入样本
+  function computeRollingBandsTtmJs(series, windowDays, minSamples) {
+    return _computeRollingBandsCore(series, windowDays, minSamples, (p) => {
+      const src = p.length >= 5 ? (p[4] || "window") : "window";
+      return src === "window";
+    });
+  }
+  // 年化 series 元素 [date, close, annual_dividend, annual_yield_pct, annual_year]：annual_year 非 null 入样本
+  function computeRollingBandsAnnualJs(annualSeries, windowDays, minSamples) {
+    return _computeRollingBandsCore(annualSeries, windowDays, minSamples, (p) => {
+      return p.length >= 5 && p[4] !== null && p[4] !== undefined;
+    });
+  }
+
   function sourceLabel(src) {
     return (
       {
@@ -815,19 +1184,69 @@
     );
   }
 
-  function buildChart(series, percentiles = {}, annualSeries = []) {
+  function loadLineVis() {
+    try {
+      const obj = JSON.parse(localStorage.getItem(LINES_PREF_KEY) || "{}");
+      return { ...DEFAULT_LINE_VIS, ...obj };
+    } catch (e) {
+      return { ...DEFAULT_LINE_VIS };
+    }
+  }
+  function saveLineVis(vis) {
+    try { localStorage.setItem(LINES_PREF_KEY, JSON.stringify(vis)); } catch (e) {}
+  }
+
+  function buildChart(series, percentiles = {}, annualSeries = [], opts = {}) {
+    const rawBandsDefault = opts.bands || [];          // 后端预算的 3 年带，首屏直接用
+    const rawAnnualBandsDefault = opts.annualBands || [];
     // 剔除 lapsed / pre_first（视为图上的断点），保留 window + carry
-    const allPoints = series.filter((p) => {
-      if (p[3] === null) return false;
+    // 同时记下每个 allPoints 对应的原始 series 下标，以便 bands 同步对齐
+    const allPoints = [];
+    const allPointsSrcIdx = [];
+    series.forEach((p, i) => {
+      if (p[3] === null) return;
       const src = sourceOf(p);
-      return src === "window" || src === "carry";
+      if (src !== "window" && src !== "carry") return;
+      allPoints.push(p);
+      allPointsSrcIdx.push(i);
     });
     // 年化：剔除 yield_pct = null/0（pre_first 期）的点
-    const annualPoints = annualSeries.filter(
-      (p) => p[3] !== null && p[3] !== undefined && p[3] > 0
-    );
+    const annualPoints = [];
+    const annualPointsSrcIdx = [];
+    annualSeries.forEach((p, i) => {
+      if (p[3] === null || p[3] === undefined || p[3] <= 0) return;
+      annualPoints.push(p);
+      annualPointsSrcIdx.push(i);
+    });
     // 同日索引：tooltip 锚定 TTM 日期后能立刻查到对应年化点
     const annualByDate = new Map(annualPoints.map((p) => [p[0], p]));
+
+    // 滚动带数组：跟着 windowYears 变。默认 3y 用后端预算的；改了就在 JS 里重算。
+    // 用 let 而非 const，因为 applyWindowYears 会重新赋值；rebuild() 通过闭包每次取最新引用。
+    let allBands = [];
+    let annualBands = [];
+    let windowYears = parseFloat(localStorage.getItem(WINDOW_PREF_KEY));
+    if (!isFinite(windowYears) || windowYears < 0.5 || windowYears > 10) {
+      windowYears = DEFAULT_WINDOW_YEARS;
+    }
+    function applyWindowYears(years) {
+      let rawTtm, rawAnn;
+      const usingDefault = years === DEFAULT_WINDOW_YEARS
+        && rawBandsDefault.length === series.length
+        && rawAnnualBandsDefault.length === annualSeries.length;
+      if (usingDefault) {
+        rawTtm = rawBandsDefault;
+        rawAnn = rawAnnualBandsDefault;
+      } else {
+        const windowDays = Math.max(60, Math.round(years * TRADING_DAYS_PER_YEAR));
+        const minSamples = Math.max(60, Math.floor(windowDays / 3));
+        rawTtm = computeRollingBandsTtmJs(series, windowDays, minSamples);
+        rawAnn = computeRollingBandsAnnualJs(annualSeries, windowDays, minSamples);
+      }
+      allBands = allPointsSrcIdx.map((i) => rawTtm[i] || null);
+      annualBands = annualPointsSrcIdx.map((i) => rawAnn[i] || null);
+    }
+    applyWindowYears(windowYears);
 
     if (!allPoints.length) {
       const empty = document.createElement("div");
@@ -860,14 +1279,130 @@
     zoomHint.textContent = "拖选区间放大";
     bar.appendChild(zoomHint);
 
-    // 双口径图例
+    // 可见性图例：每条曲线/分位线都是一个独立 chip，点击切换显示
+    const lineVis = loadLineVis();
     const legend = document.createElement("span");
     legend.className = "chart-legend";
-    legend.innerHTML = `
-      <span class="legend-item"><span class="legend-swatch legend-ttm"></span>TTM 365 天滚动</span>
-      <span class="legend-item"><span class="legend-swatch legend-annual"></span>年化派息年累计</span>
-    `;
     bar.appendChild(legend);
+
+    // 分位模式切换：静态全历史水平线 / 滚动 750 日带状区
+    let bandsMode = localStorage.getItem(BANDS_PREF_KEY) || "rolling";
+    const hasBands = allBands.some((b) => b && b[0] != null);
+    if (!hasBands && bandsMode === "rolling") {
+      // 后端字段缺失或全 null（如冷启动期、上市不足 1 年），本次渲染回退到静态，但不持久化
+      bandsMode = "static";
+    }
+    const bandsToggleWrap = document.createElement("span");
+    bandsToggleWrap.className = "chart-bands-toggle";
+    const bandsBtns = [
+      { mode: "static", label: "静态分位" },
+      { mode: "rolling", label: "滚动分位" },
+    ].map(({ mode, label }) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "chart-btn chart-btn-bands";
+      btn.textContent = label;
+      btn.classList.toggle("active", mode === bandsMode);
+      btn.addEventListener("click", () => {
+        if (bandsMode === mode) return;
+        bandsMode = mode;
+        localStorage.setItem(BANDS_PREF_KEY, mode);
+        bandsBtns.forEach((b) => b.btn.classList.toggle("active", b.mode === mode));
+        applyLegendModeVisibility();
+        updateWindowInputVisibility();
+        rebuild();
+      });
+      bandsToggleWrap.appendChild(btn);
+      return { mode, btn };
+    });
+    bar.appendChild(bandsToggleWrap);
+
+    // 滚动窗口长度手动输入：年。默认 3，仅在 rolling 模式下显示。
+    // 改值时在前端 JS 里重算 bands（不重新请求后端），即时生效。
+    const windowInputWrap = document.createElement("span");
+    windowInputWrap.className = "chart-window-wrap";
+    const windowInputLabel = document.createElement("span");
+    windowInputLabel.className = "chart-window-label muted";
+    windowInputLabel.textContent = "窗口";
+    const windowInput = document.createElement("input");
+    windowInput.type = "number";
+    windowInput.className = "chart-window-input";
+    windowInput.min = "0.5";
+    windowInput.max = "10";
+    windowInput.step = "0.5";
+    windowInput.value = String(windowYears);
+    windowInput.title = "滚动分位窗口长度（年）。0.5–10，每 0.5 年一档。改值即时在前端重算 P10–P90，无需后端请求。";
+    const windowInputUnit = document.createElement("span");
+    windowInputUnit.className = "chart-window-unit muted";
+    windowInputUnit.textContent = "年";
+    windowInputWrap.appendChild(windowInputLabel);
+    windowInputWrap.appendChild(windowInput);
+    windowInputWrap.appendChild(windowInputUnit);
+    function updateWindowInputVisibility() {
+      windowInputWrap.style.display = bandsMode === "rolling" ? "" : "none";
+    }
+    function commitWindowChange() {
+      let v = parseFloat(windowInput.value);
+      if (!isFinite(v)) v = DEFAULT_WINDOW_YEARS;
+      v = Math.max(0.5, Math.min(10, Math.round(v * 2) / 2)); // 吸到 0.5 倍数
+      windowInput.value = String(v);
+      if (v === windowYears) return;
+      windowYears = v;
+      localStorage.setItem(WINDOW_PREF_KEY, String(v));
+      applyWindowYears(v);
+      rebuild();
+    }
+    windowInput.addEventListener("change", commitWindowChange);
+    windowInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); commitWindowChange(); windowInput.blur(); }
+    });
+    updateWindowInputVisibility();
+    bar.appendChild(windowInputWrap);
+
+    // legend chip：scope=any 始终显示；scope=rolling 仅滚动模式显示；scope=static 仅静态模式显示
+    // 滚动带视觉只有 3 层（外带/内带/中位），所以滚动模式下用 3 个组件 chip 而非 5 个分位 chip
+    // 静态模式仍是 4 条独立水平线，保留 P25/P50/P75/P90 各自的 chip
+    const legendDefs = [
+      { key: "ttm",         label: "TTM 365 天滚动", swatch: "legend-ttm",         scope: "any" },
+      { key: "annual",      label: "年化派息年累计", swatch: "legend-annual",      scope: "any" },
+      { key: "price",       label: "股价 (右轴)",     swatch: "legend-price",       scope: "any" },
+      { key: "band_outer",  label: "外带 P10–P90",   swatch: "legend-band-outer",  scope: "rolling" },
+      { key: "band_inner",  label: "内带 P25–P75",   swatch: "legend-band-inner",  scope: "rolling" },
+      { key: "band_median", label: "中位 P50",        swatch: "legend-band-median", scope: "rolling" },
+      { key: "p25",         label: "P25",             swatch: "legend-p25",         scope: "static" },
+      { key: "p50",         label: "P50",             swatch: "legend-p50",         scope: "static" },
+      { key: "p75",         label: "P75",             swatch: "legend-p75",         scope: "static" },
+      { key: "p90",         label: "P90",             swatch: "legend-p90",         scope: "static" },
+    ];
+    const legendChips = legendDefs.map((def) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "legend-chip";
+      chip.title = `点击切换 ${def.label} 显示`;
+      chip.innerHTML =
+        `<span class="legend-swatch ${def.swatch}"></span>` +
+        `<span class="legend-label">${def.label}</span>`;
+      const sync = () => chip.classList.toggle("off", !lineVis[def.key]);
+      sync();
+      chip.addEventListener("click", () => {
+        lineVis[def.key] = !lineVis[def.key];
+        sync();
+        saveLineVis(lineVis);
+        rebuild();
+      });
+      legend.appendChild(chip);
+      return { ...def, el: chip };
+    });
+    function applyLegendModeVisibility() {
+      legendChips.forEach((c) => {
+        if (c.scope === "static") {
+          c.el.style.display = bandsMode === "static" ? "" : "none";
+        } else if (c.scope === "rolling") {
+          c.el.style.display = bandsMode === "rolling" ? "" : "none";
+        }
+      });
+    }
+    applyLegendModeVisibility();
 
     const resetBtn = document.createElement("button");
     resetBtn.type = "button";
@@ -924,9 +1459,14 @@
         annualPoints,
         annualByDate,
         percentiles,
+        bandsMode,
+        allBands,
+        annualBands,
+        windowYears,
         viewT0,
         viewT1,
         onZoom: setRange,
+        lineVis,
       });
     }
 
@@ -943,27 +1483,47 @@
     annualPoints = [],
     annualByDate = new Map(),
     percentiles,
+    bandsMode = "static",
+    allBands = [],
+    annualBands = [],
+    windowYears = DEFAULT_WINDOW_YEARS,
     viewT0,
     viewT1,
     onZoom,
+    lineVis = DEFAULT_LINE_VIS,
   }) {
+    const visTTM = lineVis.ttm !== false;
+    const visAnnual = lineVis.annual !== false;
+    const visPrice = lineVis.price !== false;
+    const visPct = (k) => lineVis[k] !== false;
     const svgNS = "http://www.w3.org/2000/svg";
     const W = 960;
     const H = 280;
     const PAD_L = 50;
-    const PAD_R = 60;
+    const PAD_R = 70; // 增宽：右侧腾出空间给股价右轴
     const PAD_T = 16;
     const PAD_B = 28;
     const innerW = W - PAD_L - PAD_R;
     const innerH = H - PAD_T - PAD_B;
 
-    const points = allPoints.filter((p) => {
+    // 视口内 points + bands 同步对齐（按相同的 viewT0..viewT1 过滤）
+    const points = [];
+    const visibleBands = [];
+    allPoints.forEach((p, i) => {
       const t = Date.parse(p[0]);
-      return t >= viewT0 && t <= viewT1;
+      if (t >= viewT0 && t <= viewT1) {
+        points.push(p);
+        visibleBands.push(allBands[i] || null);
+      }
     });
-    const annualVisible = annualPoints.filter((p) => {
+    const annualVisible = [];
+    const annualVisibleBands = [];
+    annualPoints.forEach((p, i) => {
       const t = Date.parse(p[0]);
-      return t >= viewT0 && t <= viewT1;
+      if (t >= viewT0 && t <= viewT1) {
+        annualVisible.push(p);
+        annualVisibleBands.push(annualBands[i] || null);
+      }
     });
 
     if (!points.length) {
@@ -974,24 +1534,73 @@
       return;
     }
 
-    const ttmMax = Math.max(...points.map((p) => p[3]));
-    const annualMax = annualVisible.length
+    // 滚动模式 tooltip 用：按日期反查年化带（年化 series 与 TTM 不一定逐行对齐，所以只能按日期 join）
+    const annualBandByDate = new Map();
+    annualVisible.forEach((p, i) => {
+      const b = annualVisibleBands[i];
+      if (b && b[0] != null) annualBandByDate.set(p[0], b);
+    });
+
+    const ttmMax = visTTM ? Math.max(...points.map((p) => p[3])) : 0;
+    const annualMax = visAnnual && annualVisible.length
       ? Math.max(...annualVisible.map((p) => p[3]))
       : 0;
-    const pctMax = Math.max(
-      ...["p10", "p25", "p50", "p75", "p90"]
-        .map((k) => percentiles[k])
-        .filter((v) => v !== null && v !== undefined),
-      0
-    );
-    const yMax = Math.max(ttmMax, annualMax, pctMax) * 1.1 || 1;
+    // 静态分位模式下，仅当对应分位线开启时才参与 y 轴上界
+    let pctMax = 0;
+    if (bandsMode === "static") {
+      ["p25", "p50", "p75", "p90"].forEach((k) => {
+        if (!visPct(k)) return;
+        const v = percentiles[k];
+        if (v !== null && v !== undefined && v > pctMax) pctMax = v;
+      });
+    }
+    // 滚动模式下取实际会绘制的最高组件作为 y 轴上界候选：
+    //   外带开 → 用 P90 (idx 4)；否则内带开 → 用 P75 (idx 3)；否则中位开 → P50 (idx 2)；都关 → 跳过
+    let bandsMax = 0;
+    if (bandsMode === "rolling") {
+      let topIdx = -1;
+      if (visPct("band_outer")) topIdx = 4;
+      else if (visPct("band_inner")) topIdx = 3;
+      else if (visPct("band_median")) topIdx = 2;
+      if (topIdx >= 0) {
+        const collect = (arr) =>
+          arr.forEach((b) => {
+            const v = b && b[topIdx];
+            if (v != null && v > bandsMax) bandsMax = v;
+          });
+        if (visTTM) collect(visibleBands);
+        if (visAnnual) collect(annualVisibleBands);
+      }
+    }
+    const yMax = Math.max(ttmMax, annualMax, pctMax, bandsMax) * 1.1 || 1;
     const yMin = 0;
+
+    // 右轴：股价范围。可见窗口内取 min/max，再加 8% padding；不强制零基线（股价没有零基线含义）
+    let priceMin = Infinity;
+    let priceMax = -Infinity;
+    for (const p of points) {
+      const v = p[1];
+      if (v != null && v > 0) {
+        if (v < priceMin) priceMin = v;
+        if (v > priceMax) priceMax = v;
+      }
+    }
+    const hasPrice = visPrice && priceMin !== Infinity && priceMax > 0;
+    let priceLow = 0;
+    let priceHigh = 1;
+    if (hasPrice) {
+      const span = Math.max(priceMax - priceMin, priceMax * 0.02);
+      const pad = span * 0.08;
+      priceLow = Math.max(0, priceMin - pad);
+      priceHigh = priceMax + pad;
+    }
 
     const xOf = (dStrOrTime) => {
       const t = typeof dStrOrTime === "number" ? dStrOrTime : Date.parse(dStrOrTime);
       return PAD_L + ((t - viewT0) / (viewT1 - viewT0)) * innerW;
     };
     const yOf = (v) => PAD_T + innerH - ((v - yMin) / (yMax - yMin)) * innerH;
+    const yPriceOf = (v) => PAD_T + innerH - ((v - priceLow) / (priceHigh - priceLow)) * innerH;
 
     // 把 points 按 source 拆段：window 段画实线，carry 段画虚线
     // 边界处让两段共享端点，视觉上无缝衔接（虚线在端点接到实线）
@@ -1056,6 +1665,26 @@
       svg.appendChild(lbl);
     });
 
+    // 右轴：股价刻度（与左轴 grid 共用横线，仅追加文字）
+    if (hasPrice) {
+      const priceFmt = (v) => {
+        if (v >= 1000) return v.toFixed(0);
+        if (v >= 100) return v.toFixed(1);
+        return v.toFixed(2);
+      };
+      for (let i = 0; i <= Y_STEPS; i++) {
+        const v = priceLow + ((priceHigh - priceLow) * i) / Y_STEPS;
+        const y = PAD_T + innerH - ((v - priceLow) / (priceHigh - priceLow)) * innerH;
+        const lbl = document.createElementNS(svgNS, "text");
+        lbl.setAttribute("x", W - 6);
+        lbl.setAttribute("y", y + 4);
+        lbl.setAttribute("text-anchor", "end");
+        lbl.setAttribute("class", "chart-axis chart-axis-price");
+        lbl.textContent = "¥" + priceFmt(v);
+        svg.appendChild(lbl);
+      }
+    }
+
     xTicks.forEach((t) => {
       const lbl = document.createElementNS(svgNS, "text");
       lbl.setAttribute("x", t.x);
@@ -1066,56 +1695,96 @@
       svg.appendChild(lbl);
     });
 
-    const pctLines = [
-      { key: "p25", label: "P25" },
-      { key: "p50", label: "P50" },
-      { key: "p75", label: "P75" },
-      { key: "p90", label: "P90" },
-    ];
-    pctLines.forEach((pl) => {
-      const v = percentiles[pl.key];
-      if (v === null || v === undefined) return;
-      const y = yOf(v);
-      if (y < PAD_T || y > PAD_T + innerH) return;
-      const line = document.createElementNS(svgNS, "line");
-      line.setAttribute("x1", PAD_L);
-      line.setAttribute("x2", W - PAD_R);
-      line.setAttribute("y1", y);
-      line.setAttribute("y2", y);
-      line.setAttribute("class", `pct-line pct-line-${pl.key}`);
-      svg.appendChild(line);
+    if (bandsMode === "static") {
+      const pctLines = [
+        { key: "p25", label: "P25" },
+        { key: "p50", label: "P50" },
+        { key: "p75", label: "P75" },
+        { key: "p90", label: "P90" },
+      ];
+      pctLines.forEach((pl) => {
+        if (!visPct(pl.key)) return;
+        const v = percentiles[pl.key];
+        if (v === null || v === undefined) return;
+        const y = yOf(v);
+        if (y < PAD_T || y > PAD_T + innerH) return;
+        const line = document.createElementNS(svgNS, "line");
+        line.setAttribute("x1", PAD_L);
+        line.setAttribute("x2", W - PAD_R);
+        line.setAttribute("y1", y);
+        line.setAttribute("y2", y);
+        line.setAttribute("class", `pct-line pct-line-${pl.key}`);
+        svg.appendChild(line);
 
-      const lbl = document.createElementNS(svgNS, "text");
-      lbl.setAttribute("x", W - PAD_R + 6);
-      lbl.setAttribute("y", y + 4);
-      lbl.setAttribute("class", `pct-label pct-label-${pl.key}`);
-      lbl.textContent = `${pl.label} ${v.toFixed(2)}%`;
-      svg.appendChild(lbl);
-    });
+        const lbl = document.createElementNS(svgNS, "text");
+        lbl.setAttribute("x", W - PAD_R + 6);
+        lbl.setAttribute("y", y + 4);
+        lbl.setAttribute("class", `pct-label pct-label-${pl.key}`);
+        lbl.textContent = `${pl.label} ${v.toFixed(2)}%`;
+        svg.appendChild(lbl);
+      });
+    } else {
+      // 滚动分位带：TTM 蓝带 + 年化紫带，z-order 在曲线之下；隐藏的系列连同其分位带一起隐藏
+      // 3 个组件 chip 直接控制对应层是否绘制
+      const bandVis = {
+        outer: visPct("band_outer"),
+        inner: visPct("band_inner"),
+        median: visPct("band_median"),
+      };
+      if (visTTM) drawRollingBands(svg, points, visibleBands, xOf, yOf, "ttm", bandVis);
+      if (visAnnual) drawRollingBands(svg, annualVisible, annualVisibleBands, xOf, yOf, "annual", bandVis);
+    }
 
-    segments.forEach((seg) => {
-      if (seg.points.length < 2) return;
-      const p = document.createElementNS(svgNS, "path");
-      p.setAttribute("d", pathD(seg.points));
-      p.setAttribute(
-        "class",
-        seg.source === "carry" ? "chart-line-carry" : "chart-line"
-      );
-      svg.appendChild(p);
-    });
+    // 股价折线（右轴）：先画，让股息率主线压在上面
+    if (hasPrice) {
+      const priceSegs = [];
+      let curSeg = null;
+      for (const p of points) {
+        if (p[1] != null && p[1] > 0) {
+          if (!curSeg) { curSeg = []; priceSegs.push(curSeg); }
+          curSeg.push(p);
+        } else {
+          curSeg = null;
+        }
+      }
+      priceSegs.forEach((seg) => {
+        if (seg.length < 2) return;
+        let d = `M ${xOf(seg[0][0]).toFixed(1)} ${yPriceOf(seg[0][1]).toFixed(1)}`;
+        for (let i = 1; i < seg.length; i++) {
+          d += ` L ${xOf(seg[i][0]).toFixed(1)} ${yPriceOf(seg[i][1]).toFixed(1)}`;
+        }
+        const path = document.createElementNS(svgNS, "path");
+        path.setAttribute("d", d);
+        path.setAttribute("class", "chart-line-price");
+        svg.appendChild(path);
+      });
+    }
+
+    if (visTTM) {
+      segments.forEach((seg) => {
+        if (seg.points.length < 2) return;
+        const p = document.createElementNS(svgNS, "path");
+        p.setAttribute("d", pathD(seg.points));
+        p.setAttribute(
+          "class",
+          seg.source === "carry" ? "chart-line-carry" : "chart-line"
+        );
+        svg.appendChild(p);
+      });
+    }
 
     // 年化曲线（紫色实线，从 annualVisible 一次性画出）
-    if (annualVisible.length >= 2) {
+    if (visAnnual && annualVisible.length >= 2) {
       const annualPath = document.createElementNS(svgNS, "path");
       annualPath.setAttribute("d", pathD(annualVisible));
       annualPath.setAttribute("class", "chart-line-annual");
       svg.appendChild(annualPath);
     }
 
-    // EOD / Live —— 仅在 EOD 在可见窗口内时绘制（TTM 蓝点 + 年化紫点）
+    // EOD / Live —— 仅在 EOD 在可见窗口内、且对应系列开启时绘制
     const lastFullPoint = allPoints[allPoints.length - 1];
     const eodT = Date.parse(lastFullPoint[0]);
-    if (eodT >= viewT0 && eodT <= viewT1) {
+    if (visTTM && eodT >= viewT0 && eodT <= viewT1) {
       const eodDot = document.createElementNS(svgNS, "circle");
       eodDot.setAttribute("cx", xOf(lastFullPoint[0]));
       eodDot.setAttribute("cy", yOf(lastFullPoint[3]));
@@ -1126,7 +1795,7 @@
       );
       svg.appendChild(eodDot);
     }
-    if (annualVisible.length) {
+    if (visAnnual && annualVisible.length) {
       const lastAnnual = annualVisible[annualVisible.length - 1];
       const annualDot = document.createElementNS(svgNS, "circle");
       annualDot.setAttribute("cx", xOf(lastAnnual[0]));
@@ -1151,6 +1820,12 @@
     hoverDotAnnual.setAttribute("class", "chart-hover-dot-annual");
     hoverDotAnnual.style.display = "none";
     svg.appendChild(hoverDotAnnual);
+
+    const hoverDotPrice = document.createElementNS(svgNS, "circle");
+    hoverDotPrice.setAttribute("r", 4);
+    hoverDotPrice.setAttribute("class", "chart-hover-dot-price");
+    hoverDotPrice.style.display = "none";
+    svg.appendChild(hoverDotPrice);
 
     const hoverLine = document.createElementNS(svgNS, "line");
     hoverLine.setAttribute("class", "chart-hover-line");
@@ -1195,6 +1870,7 @@
       brushRect.style.display = "";
       hoverDot.style.display = "none";
       hoverDotAnnual.style.display = "none";
+      hoverDotPrice.style.display = "none";
       hoverLine.style.display = "none";
       tooltip.style.display = "none";
       ev.preventDefault();
@@ -1221,9 +1897,13 @@
       const p = points[lo];
       const px = xOf(p[0]);
       const py = yOf(p[3]);
-      hoverDot.setAttribute("cx", px);
-      hoverDot.setAttribute("cy", py);
-      hoverDot.style.display = "";
+      if (visTTM) {
+        hoverDot.setAttribute("cx", px);
+        hoverDot.setAttribute("cy", py);
+        hoverDot.style.display = "";
+      } else {
+        hoverDot.style.display = "none";
+      }
       hoverLine.setAttribute("x1", px);
       hoverLine.setAttribute("x2", px);
       hoverLine.style.display = "";
@@ -1231,7 +1911,7 @@
       // 同日年化点：用日期 string 索引，避免双 series 长度对不齐时错位
       const ap = annualByDate.get(p[0]);
       let annualLine = "";
-      if (ap && ap[3] !== null && ap[3] !== undefined && ap[3] > 0) {
+      if (visAnnual && ap && ap[3] !== null && ap[3] !== undefined && ap[3] > 0) {
         const apy = yOf(ap[3]);
         hoverDotAnnual.setAttribute("cx", px);
         hoverDotAnnual.setAttribute("cy", apy);
@@ -1248,20 +1928,75 @@
         hoverDotAnnual.style.display = "none";
       }
 
+      // 股价 hover 点（与 TTM 同一日期，固定走右轴）
+      if (hasPrice && p[1] != null && p[1] > 0) {
+        hoverDotPrice.setAttribute("cx", px);
+        hoverDotPrice.setAttribute("cy", yPriceOf(p[1]));
+        hoverDotPrice.style.display = "";
+      } else {
+        hoverDotPrice.style.display = "none";
+      }
+
       const srcLabel = sourceLabel(sourceOf(p));
       const srcLine = srcLabel
         ? `<div class="muted">${srcLabel}</div>`
         : "";
+      const ttmLine = visTTM
+        ? `<div class="tt-row">
+            <span class="legend-swatch legend-ttm"></span>
+            TTM
+            <b class="${yieldClass(p[3])}" style="margin-left:6px">${fmtNumber(p[3], 2)}%</b>
+            <span class="muted" style="margin-left:6px">近 365 天 ${fmtNumber(p[2], 4)}</span>
+          </div>`
+        : "";
+
+      // 滚动模式专属：在对应曲线下方画一个分位网格
+      // 哪些 P 值显示，跟 3 个组件 chip 走：外带 → P10/P90；内带 → P25/P75；中位 → P50
+      const ttmBand = bandsMode === "rolling" && visTTM ? visibleBands[lo] : null;
+      const annualBand = bandsMode === "rolling" && visAnnual ? annualBandByDate.get(p[0]) : null;
+      const winLabel = `${windowYears % 1 === 0 ? windowYears : windowYears.toFixed(1)}y 滚动带`;
+      const visibleBandKeys = (() => {
+        const keys = [];
+        if (visPct("band_outer"))  keys.push({ key: "p10", idx: 0 });
+        if (visPct("band_inner"))  keys.push({ key: "p25", idx: 1 });
+        if (visPct("band_median")) keys.push({ key: "p50", idx: 2 });
+        if (visPct("band_inner"))  keys.push({ key: "p75", idx: 3 });
+        if (visPct("band_outer"))  keys.push({ key: "p90", idx: 4 });
+        return keys;
+      })();
+      const renderBandGrid = (band, scopeClass, titleSuffix) => {
+        if (!band || !visibleBandKeys.length) return "";
+        const cells = visibleBandKeys
+          .filter((b) => band[b.idx] != null)
+          .map((b) => `
+            <div class="tt-band-cell tt-band-cell-${b.key}">
+              <span class="tt-band-k">${b.key.toUpperCase()}</span>
+              <span class="tt-band-v">${fmtNumber(band[b.idx], 2)}</span>
+            </div>`)
+          .join("");
+        if (!cells) return "";
+        return `
+          <div class="tt-band ${scopeClass}">
+            <div class="tt-band-title">${winLabel}${titleSuffix}</div>
+            <div class="tt-band-grid">${cells}</div>
+          </div>`;
+      };
+      const ttmBandLine = renderBandGrid(ttmBand, "tt-band-ttm", " · TTM");
+      const annualBandLine = renderBandGrid(annualBand, "tt-band-annual", " · 年化");
+
+      const priceLine = `
+        <div class="tt-row">
+          <span class="legend-swatch legend-price"></span>
+          股价
+          <b style="margin-left:6px">¥${fmtNumber(p[1], 2)}</b>
+        </div>`;
       tooltip.innerHTML = `
         <div class="tt-date">${p[0]}</div>
-        <div class="tt-row"><span class="muted">价</span> <b>${fmtNumber(p[1], 2)}</b></div>
-        <div class="tt-row">
-          <span class="legend-swatch legend-ttm"></span>
-          TTM
-          <b class="${yieldClass(p[3])}" style="margin-left:6px">${fmtNumber(p[3], 2)}%</b>
-          <span class="muted" style="margin-left:6px">近 365 天 ${fmtNumber(p[2], 4)}</span>
-        </div>
+        ${priceLine}
+        ${ttmLine}
+        ${ttmBandLine}
         ${annualLine}
+        ${annualBandLine}
         ${srcLine}
       `;
       tooltip.style.display = "";
@@ -1291,11 +2026,94 @@
       }
       hoverDot.style.display = "none";
       hoverDotAnnual.style.display = "none";
+      hoverDotPrice.style.display = "none";
       hoverLine.style.display = "none";
       tooltip.style.display = "none";
     });
 
     container.appendChild(svg);
+  }
+
+  // 绘制滚动分位带：每段连续非 null 的 bands 输出 P10-P90 外带 + P25-P75 内带 + P50 中位虚线
+  // points 与 bands 等长（已按视口同步过滤），bands[i] 形如 [p10,p25,p50,p75,p90] 或 null/全 null
+  // bandVis 控制哪些组件参与绘制：{outer, inner, median}
+  function drawRollingBands(svg, points, bands, xOf, yOf, color, bandVis) {
+    if (!points.length || !bands.length) return;
+    const vis = bandVis || { outer: true, inner: true, median: true };
+    if (!vis.outer && !vis.inner && !vis.median) return;
+    const svgNS = "http://www.w3.org/2000/svg";
+
+    // 切分连续非 null 段。"有效"判定按当前要绘制的最低组件所需的索引集合走，
+    // 例如只有 median 时只需 idx 2 非 null，无需 P10/P90 也存在
+    const requiredIdx = [];
+    if (vis.outer) { requiredIdx.push(0, 4); }
+    if (vis.inner) { requiredIdx.push(1, 3); }
+    if (vis.median) { requiredIdx.push(2); }
+    const segments = [];
+    let cur = null;
+    for (let i = 0; i < points.length; i++) {
+      const b = bands[i];
+      const valid = b && requiredIdx.every((idx) => b[idx] != null);
+      if (valid) {
+        if (!cur) {
+          cur = [];
+          segments.push(cur);
+        }
+        cur.push({ p: points[i], b });
+      } else {
+        cur = null;
+      }
+    }
+    if (!segments.length) return;
+
+    const polygonD = (seg, loIdx, hiIdx) => {
+      // 上沿 loIdx 正向 → 下沿 hiIdx 逆序闭合
+      let d = "";
+      seg.forEach((row, k) => {
+        const x = xOf(row.p[0]).toFixed(1);
+        const y = yOf(row.b[loIdx]).toFixed(1);
+        d += k === 0 ? `M ${x} ${y}` : ` L ${x} ${y}`;
+      });
+      for (let k = seg.length - 1; k >= 0; k--) {
+        const row = seg[k];
+        const x = xOf(row.p[0]).toFixed(1);
+        const y = yOf(row.b[hiIdx]).toFixed(1);
+        d += ` L ${x} ${y}`;
+      }
+      d += " Z";
+      return d;
+    };
+    const medianD = (seg) => {
+      let d = "";
+      seg.forEach((row, k) => {
+        const x = xOf(row.p[0]).toFixed(1);
+        const y = yOf(row.b[2]).toFixed(1);
+        d += k === 0 ? `M ${x} ${y}` : ` L ${x} ${y}`;
+      });
+      return d;
+    };
+
+    segments.forEach((seg) => {
+      if (seg.length < 2) return;
+      if (vis.outer) {
+        const outer = document.createElementNS(svgNS, "path");
+        outer.setAttribute("d", polygonD(seg, 0, 4));
+        outer.setAttribute("class", `band-${color}-outer`);
+        svg.appendChild(outer);
+      }
+      if (vis.inner) {
+        const inner = document.createElementNS(svgNS, "path");
+        inner.setAttribute("d", polygonD(seg, 1, 3));
+        inner.setAttribute("class", `band-${color}-inner`);
+        svg.appendChild(inner);
+      }
+      if (vis.median) {
+        const median = document.createElementNS(svgNS, "path");
+        median.setAttribute("d", medianD(seg));
+        median.setAttribute("class", `band-${color}-median`);
+        svg.appendChild(median);
+      }
+    });
   }
 
   function makeXTicks(viewT0, viewT1, xOf) {
@@ -1371,6 +2189,46 @@
 
   // -------------------- 主刷新循环 --------------------
 
+  // 单行"已刷新到位"判定：行情 + 分红 + 计算结果三项齐全，且行情未陈旧。
+  // 与 isPriceStale 对齐：避免出现"快照成功返回 / 但其中某只回退到上次成功值"被算成正常。
+  function isRowFresh(row) {
+    if (row.error) return false;
+    if (row.price === null || row.price === undefined) return false;
+    if (row.dividend === null || row.dividend === undefined) return false;
+    if (row.yield_pct === null || row.yield_pct === undefined) return false;
+    if (isPriceStale(row)) return false;
+    return true;
+  }
+
+  // 把 freshness 摘要反映到顶部状态点 + 文字。tooltip 列出待更新 symbol 便于诊断。
+  function applyFreshness(rows) {
+    const total = rows.length;
+    const stale = rows.filter((r) => !isRowFresh(r));
+    const freshN = total - stale.length;
+    const stamp = new Date().toLocaleTimeString();
+
+    if (total === 0) {
+      statusDot.className = "dot";
+      statusDot.title = "watchlist 为空";
+      lastUpdated.textContent = "上次刷新 " + stamp;
+      return;
+    }
+    if (stale.length === 0) {
+      statusDot.className = "dot ok";
+      statusDot.title = `全部 ${total} 只数据已刷新`;
+      lastUpdated.textContent = `上次刷新 ${stamp} · ${freshN}/${total} 已更新`;
+    } else {
+      statusDot.className = "dot warn";
+      const names = stale
+        .slice(0, 8)
+        .map((r) => `${r.name}(${r.symbol})`)
+        .join("、");
+      const more = stale.length > 8 ? `… 等 ${stale.length} 只` : "";
+      statusDot.title = `仍待更新 ${stale.length} 只：${names}${more}`;
+      lastUpdated.textContent = `上次刷新 ${stamp} · ${freshN}/${total} 已更新`;
+    }
+  }
+
   async function tick() {
     try {
       const resp = await fetch("/api/yields", { cache: "no-store" });
@@ -1380,12 +2238,97 @@
       render(data.rows);
       renderPortfolio(data.portfolio);
       maybeNotify(data.rows);
-      lastUpdated.textContent = "上次刷新 " + new Date().toLocaleTimeString();
-      statusDot.className = "dot ok";
+      applyFreshness(data.rows);
     } catch (e) {
       statusDot.className = "dot err";
+      statusDot.title = "刷新失败：" + e.message;
       lastUpdated.textContent = "刷新失败：" + e.message;
     }
+  }
+
+  // -------------------- 编辑模式（多选删除） --------------------
+
+  function setupEditMode() {
+    const btn = document.getElementById("edit-mode-btn");
+    const toolbar = document.getElementById("edit-toolbar");
+    const cancelBtn = document.getElementById("edit-cancel");
+    const selectAllBtn = document.getElementById("edit-select-all");
+    const clearBtn = document.getElementById("edit-clear");
+    const bulkDelBtn = document.getElementById("edit-bulk-delete");
+    if (!btn || !toolbar) return;
+
+    btn.addEventListener("click", () => setEditMode(!editMode));
+    cancelBtn?.addEventListener("click", () => setEditMode(false));
+    selectAllBtn?.addEventListener("click", () => {
+      lastRows.forEach((r) => selectedSymbols.add(r.symbol));
+      syncAllCardsSelection();
+      updateEditToolbarCount();
+    });
+    clearBtn?.addEventListener("click", () => {
+      selectedSymbols.clear();
+      syncAllCardsSelection();
+      updateEditToolbarCount();
+    });
+    bulkDelBtn?.addEventListener("click", openBulkDeleteModal);
+  }
+
+  function setEditMode(on) {
+    editMode = !!on;
+    document.body.classList.toggle("edit-mode", editMode);
+    const toolbar = document.getElementById("edit-toolbar");
+    const btn = document.getElementById("edit-mode-btn");
+    if (toolbar) toolbar.hidden = !editMode;
+    if (btn) {
+      btn.textContent = editMode ? "完成" : "编辑";
+      btn.classList.toggle("active", editMode);
+    }
+    if (!editMode) {
+      // 退出时清空，避免下次进入残留旧勾选
+      selectedSymbols.clear();
+      // 关闭所有展开的详情面板（编辑模式期间不该有，进入时可能已有）
+    } else {
+      // 进入编辑模式：先合上详情，避免与勾选交互重叠
+      Array.from(expanded.keys()).forEach((symbol) => {
+        const ctx = expanded.get(symbol);
+        ctx.abortController.abort();
+        if (ctx.liveTimer) clearInterval(ctx.liveTimer);
+        ctx.detailEl.remove();
+        expanded.delete(symbol);
+        const card = document.getElementById(cardKey({ symbol }));
+        if (card) card.classList.remove("expanded");
+      });
+    }
+    syncAllCardsSelection();
+    updateEditToolbarCount();
+  }
+
+  function toggleSelected(symbol) {
+    if (selectedSymbols.has(symbol)) selectedSymbols.delete(symbol);
+    else selectedSymbols.add(symbol);
+    const card = document.getElementById(cardKey({ symbol }));
+    if (card) syncCardSelection(card, symbol);
+    updateEditToolbarCount();
+  }
+
+  function syncCardSelection(card, symbol) {
+    const sel = selectedSymbols.has(symbol);
+    card.classList.toggle("selected", sel);
+    const cb = card.querySelector('input[data-act="select"]');
+    if (cb) cb.checked = sel;
+  }
+
+  function syncAllCardsSelection() {
+    cardsGrid.querySelectorAll(".card, .list-row").forEach((el) => {
+      const symbol = el.dataset.symbol;
+      if (symbol) syncCardSelection(el, symbol);
+    });
+  }
+
+  function updateEditToolbarCount() {
+    const countEl = document.getElementById("edit-selected-count");
+    const bulkBtn = document.getElementById("edit-bulk-delete");
+    if (countEl) countEl.textContent = String(selectedSymbols.size);
+    if (bulkBtn) bulkBtn.disabled = selectedSymbols.size === 0;
   }
 
   // -------------------- 桌面通知 --------------------
@@ -1476,6 +2419,7 @@
   setupSortToolbar();
   setupNotifyToggle();
   setupAddStockButton();
+  setupEditMode();
   tick();
   setInterval(tick, refreshSeconds * 1000);
 
@@ -1798,6 +2742,69 @@
         submitBtn.disabled = false;
         submitBtn.textContent = "删除";
       }
+    });
+  }
+
+  function openBulkDeleteModal() {
+    if (selectedSymbols.size === 0) return;
+    const targets = lastRows.filter((r) => selectedSymbols.has(r.symbol));
+    if (!targets.length) return;
+    const listHtml = targets
+      .map(
+        (r) =>
+          `<div class="bulk-del-item"><b>${r.name}</b> <span class="muted">${r.symbol}</span></div>`
+      )
+      .join("");
+    openModal(`
+      <div class="modal-overlay">
+        <form class="modal-card modal-form" id="bulk-delete-form">
+          <div class="modal-title">删除选中 ${targets.length} 只股票 ?</div>
+          <div class="modal-hint">
+            将从 watchlist 批量移除并清理对应缓存。重新添加需要重拉历史数据。
+          </div>
+          <div class="bulk-del-list">${listHtml}</div>
+          <div class="modal-actions">
+            <button type="button" data-act="cancel">取消</button>
+            <button type="submit" class="danger" data-act="submit">删除 ${targets.length} 只</button>
+          </div>
+        </form>
+      </div>
+    `);
+    const form = document.getElementById("bulk-delete-form");
+    form.querySelector('[data-act="cancel"]').addEventListener("click", closeModal);
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const submitBtn = form.querySelector('[data-act="submit"]');
+      submitBtn.disabled = true;
+      submitBtn.textContent = "删除中…";
+      // 串行 DELETE：watchlist 写入端有进程级锁；同时也避免一次发起 N 个并发请求触发 tick 风暴
+      const failed = [];
+      for (const r of targets) {
+        try {
+          const resp = await fetch(`/api/watchlist/${r.symbol}`, { method: "DELETE" });
+          if (!resp.ok) {
+            const j = await resp.json().catch(() => ({}));
+            failed.push(`${r.symbol}: ${j.detail || `HTTP ${resp.status}`}`);
+            continue;
+          }
+          selectedSymbols.delete(r.symbol);
+          const card = document.getElementById(`c-${r.symbol}`);
+          if (card) card.remove();
+        } catch (err) {
+          failed.push(`${r.symbol}: ${err.message}`);
+        }
+      }
+      if (failed.length) {
+        showError(form, "部分失败：\n" + failed.join("\n"));
+        submitBtn.disabled = false;
+        submitBtn.textContent = `删除 ${selectedSymbols.size} 只`;
+        updateEditToolbarCount();
+        tick();
+        return;
+      }
+      closeModal();
+      setEditMode(false);
+      tick();
     });
   }
 })();

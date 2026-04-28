@@ -10,6 +10,7 @@ from app.data_sources.base import HistoricalPriceSource
 from app.models import DailyBar, DividendEvent, Stock
 from app.services.dividend_service import (
     DividendService,
+    analyze_latest_annual,
     earliest_ex_date_in_year,
     annual_payment_groups,
     drop_incomplete_latest_year,
@@ -23,7 +24,9 @@ _STATIC_TTL_SECONDS = 6 * 3600   # 静态部分（series/分位/年度/预估）
 _TTM_DAYS = 365
 _CARRY_STALE_DAYS = 540   # 距上次除权 > 此天数仍无新分红 → 视为已停止分红（lapsed）
 _INCREMENTAL_MAX_STALE_DAYS = 30  # stale 超过此天数走全量重拉，避免一次性补几个月数据时的边界 bug
-_STATIC_CACHE_NAME = "history_static_v9_cache"  # v9：lapsed_summary 增加 segments 列表（每段起止+触发/恢复 ex_date），旧 v8 缓存自然失效
+_ROLLING_WINDOW_DAYS = 750   # 滚动分位带的窗口长度（约 3 年交易日）
+_ROLLING_MIN_SAMPLES = 250   # 窗口内有效样本不足时该日不输出分位（约 1 年）
+_STATIC_CACHE_NAME = "history_static_v11_cache"  # v11：series/annual_series 各加并行 rolling bands（750 交易日窗口），旧 v10 自然失效
 
 # series 每条记录第 5 列 source 的取值
 SOURCE_WINDOW = "window"        # 365 天窗口里有真实分红数据
@@ -157,6 +160,8 @@ class HistoryService:
         forecast = forecast_next_year(annual)
         percentiles = compute_percentiles(series)
         annual_percentiles = compute_annual_percentiles(annual_series)
+        bands = compute_rolling_bands(series)
+        annual_bands = compute_annual_rolling_bands(annual_series)
 
         eod = None
         if series:
@@ -184,17 +189,33 @@ class HistoryService:
             series, events, carry_stale_days=self.carry_stale_days
         )
 
+        # 与首页卡片保持一致：仅在最近一个完整派息年被判为"含特别股利"时，
+        # 给该年内的所有事件打 unusual。不在历史所有年份扫描，避免成长股
+        # （如复合增长 ~20%/年）因近年中位数被远古小额股利拉低而误标常态化派息。
+        latest_analysis = analyze_latest_annual(events, expected_count=expected)
+        unusual_year = (
+            latest_analysis.annual.year
+            if latest_analysis.unusually_high and latest_analysis.annual is not None
+            else None
+        )
+
         result = {
             "symbol": stock.symbol,
             "name": stock.name,
             "series": series,
             "annual_series": annual_series,
             "events": [
-                {"ex_date": e.ex_date, "cash_per_share": round(e.cash_per_share, 6)}
+                {
+                    "ex_date": e.ex_date,
+                    "cash_per_share": round(e.cash_per_share, 6),
+                    "unusual": unusual_year is not None and _ex_date_year(e.ex_date) == unusual_year,
+                }
                 for e in sorted(events, key=lambda x: x.ex_date, reverse=True)
             ],
             "percentiles": percentiles,
             "annual_percentiles": annual_percentiles,
+            "bands": bands,
+            "annual_bands": annual_bands,
             "annual": annual,
             "forecast": forecast,
             "eod": eod,
@@ -320,6 +341,13 @@ class HistoryService:
                 [{"date": b.date, "close": b.close} for b in bars],
             )
         return bars
+
+
+def _ex_date_year(ex_date: str) -> int | None:
+    try:
+        return datetime.strptime(ex_date, "%Y-%m-%d").year
+    except ValueError:
+        return None
 
 
 def _merge_bars(stale: list[DailyBar], new: list[DailyBar]) -> list[DailyBar]:
@@ -635,6 +663,70 @@ def percentile_rank(value: float | None, series: list[list]) -> float | None:
     return round(pos / len(samples) * 100.0, 1)
 
 
+def _interp_percentiles(sorted_window: list[float]) -> list[float]:
+    """对已排序的样本列表做线性插值，返回 [p10,p25,p50,p75,p90]，与 compute_percentiles 同口径。"""
+    m = len(sorted_window)
+    out: list[float] = []
+    for pct in _PERCENTILES:
+        rank = (pct / 100.0) * (m - 1)
+        lo = int(rank)
+        hi = min(lo + 1, m - 1)
+        frac = rank - lo
+        v = sorted_window[lo] * (1 - frac) + sorted_window[hi] * frac
+        out.append(round(v, 2))
+    return out
+
+
+def compute_rolling_bands(
+    series: list[list],
+    *,
+    window: int = _ROLLING_WINDOW_DAYS,
+    min_samples: int = _ROLLING_MIN_SAMPLES,
+) -> list[list]:
+    """
+    返回与 series 下标 1:1 对齐的 [[p10, p25, p50, p75, p90], ...]。
+    每行用过去 window 个 series 行内的有效样本（与 _meaningful_yields 同口径：
+    source==window 且 yield>0）按线性插值算分位；窗口内有效样本 < min_samples
+    时该行为全 None。视为带状的 Bollinger 风格分位上下轨。
+    """
+    n = len(series)
+    out: list[list] = []
+    if n == 0:
+        return out
+
+    sorted_window: list[float] = []
+    fifo: list[tuple[int, float | None]] = []  # (series_index, value or None)，按插入序
+    head = 0  # fifo 当前头指针（已 popleft 的视为不存在）
+    null_row: list[float | None] = [None] * len(_PERCENTILES)
+
+    for i in range(n):
+        p = series[i]
+        ypct = p[3] if len(p) >= 4 else None
+        src = p[4] if len(p) >= 5 else SOURCE_WINDOW
+        if ypct is not None and ypct > 0 and src == SOURCE_WINDOW:
+            bisect.insort(sorted_window, ypct)
+            fifo.append((i, ypct))
+        else:
+            fifo.append((i, None))
+
+        # 窗口外的最老条目（series 行号 < i - window + 1）出队
+        cutoff = i - window + 1
+        while head < len(fifo) and fifo[head][0] < cutoff:
+            _, old_val = fifo[head]
+            head += 1
+            if old_val is not None:
+                idx = bisect.bisect_left(sorted_window, old_val)
+                if idx < len(sorted_window) and sorted_window[idx] == old_val:
+                    sorted_window.pop(idx)
+
+        if len(sorted_window) < min_samples:
+            out.append(list(null_row))
+        else:
+            out.append(_interp_percentiles(sorted_window))
+
+    return out
+
+
 # ---------------- 年化口径分位 ----------------
 #
 # 设计差异：
@@ -701,6 +793,58 @@ def annual_percentile_rank(
         return None
     pos = bisect.bisect_left(samples, value)
     return round(pos / len(samples) * 100.0, 1)
+
+
+def compute_annual_rolling_bands(
+    annual_series: list[list],
+    *,
+    window: int = _ROLLING_WINDOW_DAYS,
+    min_samples: int = _ROLLING_MIN_SAMPLES,
+) -> list[list]:
+    """
+    年化口径的滚动分位带。算法与 compute_rolling_bands 完全一致，仅样本过滤口径
+    改为 _meaningful_annual_yields 的语义（剔除 pre_first 期 year is None 与 yield<=0）。
+    返回与 annual_series 下标 1:1 对齐的 [[p10,p25,p50,p75,p90], ...]，
+    样本不足为全 None 行。
+    """
+    n = len(annual_series)
+    out: list[list] = []
+    if n == 0:
+        return out
+
+    sorted_window: list[float] = []
+    fifo: list[tuple[int, float | None]] = []
+    head = 0
+    null_row: list[float | None] = [None] * len(_PERCENTILES)
+
+    for i in range(n):
+        p = annual_series[i]
+        # 兼容旧缓存被部分清掉的情形
+        if len(p) < 5:
+            ypct, year = None, None
+        else:
+            ypct, year = p[3], p[4]
+        if year is not None and ypct is not None and ypct > 0:
+            bisect.insort(sorted_window, ypct)
+            fifo.append((i, ypct))
+        else:
+            fifo.append((i, None))
+
+        cutoff = i - window + 1
+        while head < len(fifo) and fifo[head][0] < cutoff:
+            _, old_val = fifo[head]
+            head += 1
+            if old_val is not None:
+                idx = bisect.bisect_left(sorted_window, old_val)
+                if idx < len(sorted_window) and sorted_window[idx] == old_val:
+                    sorted_window.pop(idx)
+
+        if len(sorted_window) < min_samples:
+            out.append(list(null_row))
+        else:
+            out.append(_interp_percentiles(sorted_window))
+
+    return out
 
 
 def valuation_label(rank: float | None) -> str | None:

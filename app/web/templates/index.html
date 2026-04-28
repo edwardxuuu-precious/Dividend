@@ -40,27 +40,95 @@
     </section>
 
     <nav class="sort-bar" id="sort-bar">
-      <span class="sort-label">按</span>
-      <button type="button" class="sort-pill" data-sort="yield_pct" title="按派息年聚合每股分红 / 实时价">年化股息率</button>
-      <button type="button" class="sort-pill" data-sort="yield_ttm_pct" title="过去 365 天实际除权金额 / 实时价">TTM 股息率</button>
-      <button type="button" class="sort-pill" data-sort="annual_percentile_rank" title="年化股息率在历史样本中的百分位">P 分位（年化）</button>
-      <button type="button" class="sort-pill" data-sort="percentile_rank" title="TTM 股息率在历史样本中的百分位">P 分位（TTM）</button>
-      <button type="button" class="sort-pill" data-sort="price">现价</button>
-      <button type="button" class="sort-pill" data-sort="dividend">每股分红</button>
-      <button type="button" class="sort-pill" data-sort="dividend_year">派息年度</button>
-      <button type="button" class="sort-pill" data-sort="symbol">代码</button>
-      <button type="button" class="sort-pill" data-sort="name">名称</button>
+      <span class="sort-label">排序</span>
+      <select id="sort-key" class="sort-select" aria-label="排序字段">
+        <option value="yield_pct" title="按派息年聚合每股分红 / 实时价">年化股息率</option>
+        <option value="yield_ttm_pct" title="过去 365 天实际除权金额 / 实时价">TTM 股息率</option>
+        <option value="annual_percentile_rank" title="年化股息率在历史样本中的百分位">P 分位（年化）</option>
+        <option value="percentile_rank" title="TTM 股息率在历史样本中的百分位">P 分位（TTM）</option>
+        <option value="price">现价</option>
+        <option value="dividend">每股分红</option>
+        <option value="dividend_year">派息年度</option>
+        <option value="symbol">代码</option>
+        <option value="name">名称</option>
+      </select>
+      <button id="sort-dir" type="button" class="sort-dir" title="升降序切换" aria-label="升降序切换">▼</button>
+
+      <div class="sort-bar-spacer"></div>
+
+      <button id="edit-mode-btn" type="button" class="sort-bar-btn" title="进入多选模式批量删除">编辑</button>
+
+      <div class="view-toggle" id="view-toggle" role="group" aria-label="视图切换">
+        <button type="button" class="view-btn" data-view="cards" title="卡片视图" aria-label="卡片视图">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          <span>卡片</span>
+        </button>
+        <button type="button" class="view-btn" data-view="list" title="列表视图" aria-label="列表视图">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>
+          <span>列表</span>
+        </button>
+      </div>
     </nav>
+
+    <div id="edit-toolbar" class="edit-toolbar" hidden>
+      <span class="edit-toolbar-msg">已选 <b id="edit-selected-count">0</b> 只 · 点击行/卡片切换勾选</span>
+      <div class="edit-toolbar-actions">
+        <button id="edit-select-all" type="button" class="meta-link">全选</button>
+        <button id="edit-clear" type="button" class="meta-link">清空</button>
+        <button id="edit-bulk-delete" type="button" class="meta-link danger" disabled>删除选中</button>
+        <button id="edit-cancel" type="button" class="meta-link">退出编辑</button>
+      </div>
+    </div>
 
     <section id="cards-grid" class="cards-grid">
       <div class="cards-loading">加载中…</div>
     </section>
   </main>
 
-  <footer>
-    双口径：<b>年化</b> = 最近完整派息年累计 / 实时价（卡片大字）；
-    <b>TTM</b> = 过去 365 天实际除权金额 / 实时价（详情/图表）。
-    <b>P 分位</b>分别基于两套口径的历史样本计算，徽章一一对应。 · 数据源：akshare
+  <footer class="site-footer">
+    <details class="footer-details">
+      <summary class="footer-bar">
+        <span class="footer-meta">
+          <span class="footer-brand">A 股分红率监控</span>
+          <span class="footer-sep">·</span>
+          <span>数据 <a class="footer-link" href="https://github.com/akfamily/akshare" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">akshare</a></span>
+          <span class="footer-sep">·</span>
+          <span class="footer-disclaimer">仅供研究参考，不构成投资建议</span>
+        </span>
+        <span class="footer-toggle" aria-hidden="true">
+          <span class="footer-toggle-text">指标说明</span>
+          <svg class="footer-toggle-icon" viewBox="0 0 12 12" width="10" height="10"><path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+      </summary>
+
+      <div class="footer-panel">
+        <section class="footer-col">
+          <h4 class="footer-col-title">指标口径</h4>
+          <dl class="footer-defs">
+            <div><dt>年化</dt><dd>最近完整派息年累计 / 实时价</dd></div>
+            <div><dt>TTM</dt><dd>过去 365 天实际除权金额 / 实时价</dd></div>
+            <div><dt>卡片大字</dt><dd>取年化 / TTM 较低者，更稳健 <em>（小字为另一口径）</em></dd></div>
+            <div><dt>P 分位</dt><dd>展示卡片大字所属口径的历史分位</dd></div>
+          </dl>
+        </section>
+
+        <section class="footer-col">
+          <h4 class="footer-col-title">估值状态色</h4>
+          <ul class="status-legend">
+            <li><span class="lr-status-dot valuation-deep-cheap"></span>历史性低估 <em>P ≥ 90</em></li>
+            <li><span class="lr-status-dot valuation-cheap"></span>偏低估 <em>P 75–90</em></li>
+            <li><span class="lr-status-dot valuation-neutral"></span>中性 <em>P 25–75</em></li>
+            <li><span class="lr-status-dot valuation-rich"></span>偏高估 <em>P 10–25</em></li>
+            <li><span class="lr-status-dot valuation-deep-rich"></span>历史性高估 <em>P ≤ 10</em></li>
+          </ul>
+        </section>
+
+        <section class="footer-col">
+          <h4 class="footer-col-title">说明</h4>
+          <p class="footer-note">行情与分红明细均来自第三方公开接口（akshare），可能存在延迟或缺失。</p>
+        </section>
+      </div>
+    </details>
   </footer>
 
   <div id="modal-root"></div>
