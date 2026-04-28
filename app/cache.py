@@ -51,6 +51,16 @@ class FileCache:
             entry = self._read().get(key)
             return entry["value"] if entry else None
 
+    def delete(self, key: str) -> bool:
+        """删除指定 key。返回是否删了东西。watchlist 删股票时级联清缓存用。"""
+        with self._lock:
+            data = self._read()
+            if key not in data:
+                return False
+            del data[key]
+            self._write(data)
+            return True
+
 
 class MemoryTTLCache:
     """内存 TTL 缓存，用于行情这种高频但短时效的数据。"""
@@ -73,3 +83,7 @@ class MemoryTTLCache:
     def set(self, key: str, value: Any) -> None:
         with self._lock:
             self._store[key] = (time.time() + self.ttl, value)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._store.clear()

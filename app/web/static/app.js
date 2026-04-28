@@ -116,9 +116,15 @@
       ttm === null || ttm === undefined
         ? '<span class="card-yield-ttm muted">TTM —</span>'
         : `<span class="card-yield-ttm ${yieldClass(ttm)}" title="TTM = 过去 365 天实际除权金额 ÷ 实时价">TTM ${fmtNumber(ttm, 2)}<span class="unit-sm">%</span></span>`;
+    const unusual = row.annual_unusually_high === true;
+    const tagClass = unusual ? "card-yield-tag warn" : "card-yield-tag";
+    const tagText = unusual ? "含特别 ⚠" : "年化";
+    const yieldTitle = unusual
+      ? `派息年 ${row.dividend_year ?? "—"} 合计明显高于历史中位数（含特别股利或节奏过渡），不代表常态化股息率`
+      : `年化 = 派息年 ${row.dividend_year ?? "—"} 累计每股 ÷ 实时价`;
     return `
       <span class="card-yield-stack">
-        <span class="card-yield ${yieldClass(row.yield_pct)}" title="年化 = 派息年 ${row.dividend_year ?? "—"} 累计每股 ÷ 实时价">${fmtNumber(row.yield_pct, 2)}<span class="unit">%</span><span class="card-yield-tag">年化</span></span>
+        <span class="card-yield ${yieldClass(row.yield_pct)}" title="${yieldTitle}">${fmtNumber(row.yield_pct, 2)}<span class="unit">%</span><span class="${tagClass}">${tagText}</span></span>
         ${ttmHtml}
       </span>`;
   }
@@ -142,6 +148,10 @@
       card.classList.add("error");
     }
     card.innerHTML = `
+      <div class="card-actions">
+        <button type="button" class="btn-icon" data-act="edit" title="编辑">✏️</button>
+        <button type="button" class="btn-icon danger" data-act="delete" title="删除">🗑️</button>
+      </div>
       <div class="card-head">
         <div class="card-name">${row.name}</div>
         <div class="card-symbol">${row.symbol}</div>
@@ -158,7 +168,18 @@
       ${positionHtml(row)}
       <div class="card-time" data-field="time">${fmtTime(row.updated_at)}</div>
     `;
-    card.addEventListener("click", () => toggleDetail(row.symbol, row.name));
+    card.addEventListener("click", (e) => {
+      // 卡片右上角操作按钮：阻止冒泡到详情面板展开
+      const actBtn = e.target.closest('[data-act]');
+      if (actBtn) {
+        e.stopPropagation();
+        const act = actBtn.dataset.act;
+        if (act === "edit") openEditModal(row);
+        else if (act === "delete") openDeleteModal(row);
+        return;
+      }
+      toggleDetail(row.symbol, row.name);
+    });
     return card;
   }
 
@@ -324,7 +345,7 @@
                 <div class="dual-yield-badge"><span class="valuation-badge-ttm"></span></div>
               </div>
               <div class="dual-yield-tags">
-                <span class="lapsed-badge"></span>
+                <div class="lapsed-badge"></div>
               </div>
             </div>
             <div class="summary-meta muted"></div>
@@ -466,18 +487,100 @@
     el.style.display = "";
   }
 
+  function escapeHtml(s) {
+    if (s === null || s === undefined) return "";
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function renderLapsedDetailPanel(summary) {
+    const segments = summary.segments || [];
+    const threshold = summary.stale_threshold_days;
+    const intro = `
+      <div class="lapsed-detail-intro">
+        判定规则：相邻两次除权之间间隔超过 <b>${threshold}</b> 天的区间，视为一段"派息断流"。
+        TTM 在断流期间会被强制置 0（因为窗口里确实没有真实分红支撑）；图上对应位置以断点呈现。
+      </div>`;
+
+    if (segments.length === 0) {
+      return `<div class="lapsed-detail-panel" hidden>${intro}<div class="lapsed-detail-empty muted">未取到段明细。</div></div>`;
+    }
+
+    const rows = segments
+      .map((seg, i) => {
+        const span = seg.days !== null && seg.days !== undefined
+          ? `${seg.days} 天 (≈${(seg.days / 365).toFixed(1)} 年)`
+          : "—";
+        const triggerTxt = seg.prev_ex_date
+          ? `上一次派息 <b>${escapeHtml(seg.prev_ex_date)}</b> 后超过 ${threshold} 天再无新分红`
+          : "首次除权前无历史分红";
+        const resumedTxt = seg.ongoing
+          ? `<span class="lapsed-detail-ongoing">⚠ 至今未恢复</span>`
+          : seg.resumed_ex_date
+            ? `直到 <b>${escapeHtml(seg.resumed_ex_date)}</b> 才重启派息`
+            : "—";
+        return `
+          <li class="lapsed-detail-row${seg.ongoing ? " is-ongoing" : ""}">
+            <div class="lapsed-detail-row-head">
+              <span class="lapsed-detail-no">第 ${i + 1} 段</span>
+              <span class="lapsed-detail-range">${escapeHtml(seg.start_date || "—")} → ${escapeHtml(seg.end_date || "—")}</span>
+              <span class="lapsed-detail-span">${span}</span>
+            </div>
+            <div class="lapsed-detail-row-body muted">
+              <div>触发：${triggerTxt}</div>
+              <div>恢复：${resumedTxt}</div>
+            </div>
+          </li>`;
+      })
+      .join("");
+
+    return `
+      <div class="lapsed-detail-panel" hidden>
+        ${intro}
+        <ol class="lapsed-detail-list">${rows}</ol>
+        <div class="lapsed-detail-footer muted">
+          数据来源：本地按交易日逐日扫描的 TTM series（source=lapsed 的连续段），与上方折线图断点一一对应。
+        </div>
+      </div>`;
+  }
+
   function renderLapsedBadge(summary) {
     if (!summary) return "";
     const days = summary.days_since_last_ex;
-    const lastEx = summary.last_ex_date;
+    const threshold = summary.stale_threshold_days;
+    const segCount = summary.historical_lapsed_count || 0;
+
+    let triggerHtml = "";
     if (summary.currently_lapsed) {
       const monthsTxt = days ? `（距上次除权 ${days} 天，约 ${(days / 30).toFixed(0)} 个月）` : "";
-      return `<span class="lapsed-tag lapsed-current" title="超过 ${summary.stale_threshold_days} 天未派息，TTM 已置 0">⚠ 已停止分红 ${monthsTxt}</span>`;
+      const tip = `超过 ${threshold} 天未派息，TTM 已置 0。点击查看明细`;
+      triggerHtml = `<button type="button" class="lapsed-tag lapsed-current lapsed-clickable" aria-expanded="false" title="${tip}">⚠ 已停止分红 ${monthsTxt}<span class="lapsed-caret" aria-hidden="true">▾</span></button>`;
+    } else if (segCount > 0) {
+      const tip = `历史曾出现 ${segCount} 段超过 ${threshold} 天的派息空窗，点击查看每段起止与触发原因`;
+      triggerHtml = `<button type="button" class="lapsed-tag lapsed-history lapsed-clickable" aria-expanded="false" title="${tip}">历史曾断流 ${segCount} 次<span class="lapsed-caret" aria-hidden="true">▾</span></button>`;
+    } else {
+      return "";
     }
-    if (summary.historical_lapsed_count > 0) {
-      return `<span class="lapsed-tag lapsed-history" title="历史曾出现 ${summary.historical_lapsed_count} 段超过 ${summary.stale_threshold_days} 天的派息空窗（图上以断点展示）">历史曾断流 ${summary.historical_lapsed_count} 次</span>`;
-    }
-    return "";
+
+    return triggerHtml + renderLapsedDetailPanel(summary);
+  }
+
+  function wireLapsedBadge(rootEl) {
+    if (!rootEl) return;
+    const trigger = rootEl.querySelector(".lapsed-clickable");
+    const panel = rootEl.querySelector(".lapsed-detail-panel");
+    if (!trigger || !panel) return;
+    trigger.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const isOpen = trigger.getAttribute("aria-expanded") === "true";
+      const next = !isOpen;
+      trigger.setAttribute("aria-expanded", String(next));
+      panel.hidden = !next;
+      trigger.classList.toggle("is-open", next);
+    });
   }
 
   function valuationClass(label) {
@@ -569,6 +672,7 @@
       const lapsedEl = detailRow.querySelector(".lapsed-badge");
       lapsedEl.innerHTML = renderLapsedBadge(lapsedSummary);
       lapsedEl.style.display = lapsedEl.innerHTML ? "" : "none";
+      wireLapsedBadge(lapsedEl);
     }
 
     // ---------- 折线图（双线：TTM + 年化，含双 EOD 点） ----------
@@ -1371,6 +1475,329 @@
 
   setupSortToolbar();
   setupNotifyToggle();
+  setupAddStockButton();
   tick();
   setInterval(tick, refreshSeconds * 1000);
+
+  // ---------- watchlist 编辑：modal 系统 ----------
+
+  const modalRoot = document.getElementById("modal-root");
+
+  function closeModal() {
+    modalRoot.innerHTML = "";
+  }
+
+  function openModal(html) {
+    modalRoot.innerHTML = html;
+    const overlay = modalRoot.querySelector(".modal-overlay");
+    if (overlay) {
+      overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) closeModal();
+      });
+    }
+    document.addEventListener("keydown", escClose);
+  }
+
+  function escClose(e) {
+    if (e.key === "Escape") {
+      closeModal();
+      document.removeEventListener("keydown", escClose);
+    }
+  }
+
+  function showError(formEl, message) {
+    let el = formEl.querySelector(".modal-error");
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "modal-error";
+      formEl.appendChild(el);
+    }
+    el.textContent = message;
+  }
+
+  function setupAddStockButton() {
+    const btn = document.getElementById("add-stock-btn");
+    if (btn) btn.addEventListener("click", openAddModal);
+  }
+
+  function openAddModal() {
+    openModal(`
+      <div class="modal-overlay">
+        <form class="modal-card modal-form" id="add-form">
+          <div class="modal-title">添加股票</div>
+          <label>搜索（代码 / 名称）</label>
+          <div class="search-box">
+            <input name="search" id="add-search" autocomplete="off"
+                   placeholder="如: 600519 或 茅台" />
+            <div class="search-results" id="add-search-results" hidden></div>
+          </div>
+          <input type="hidden" name="symbol" />
+          <input type="hidden" name="name" />
+          <input type="hidden" name="exchange" />
+          <div class="search-selected" id="add-selected" hidden></div>
+          <label>持仓股数 (可选)</label>
+          <input name="shares" type="number" min="0" value="0" />
+          <div class="modal-hint">
+            选中候选项后再提交。系统会试拉一次行情 + 历史分红，都成功才接受。
+          </div>
+          <div class="modal-actions">
+            <button type="button" data-act="cancel">取消</button>
+            <button type="submit" class="primary" data-act="submit" disabled>添加</button>
+          </div>
+        </form>
+      </div>
+    `);
+    const form = document.getElementById("add-form");
+    const searchInput = document.getElementById("add-search");
+    const resultsEl = document.getElementById("add-search-results");
+    const selectedEl = document.getElementById("add-selected");
+    const submitBtn = form.querySelector('[data-act="submit"]');
+    let activeIdx = -1;
+    let currentResults = [];
+    let debounceTimer = null;
+    let lastQuery = "";
+
+    function selectStock(item) {
+      form.querySelector('[name="symbol"]').value = item.symbol;
+      form.querySelector('[name="name"]').value = item.name;
+      form.querySelector('[name="exchange"]').value = item.exchange;
+      searchInput.value = `${item.name} ${item.symbol}`;
+      selectedEl.hidden = false;
+      selectedEl.innerHTML = `<span class="pill">${item.exchange}</span> <b>${item.name}</b> <span class="muted">${item.symbol}</span>`;
+      resultsEl.hidden = true;
+      submitBtn.disabled = false;
+    }
+
+    function clearSelection() {
+      form.querySelector('[name="symbol"]').value = "";
+      form.querySelector('[name="name"]').value = "";
+      form.querySelector('[name="exchange"]').value = "";
+      selectedEl.hidden = true;
+      submitBtn.disabled = true;
+    }
+
+    function renderResults(items) {
+      currentResults = items;
+      activeIdx = items.length > 0 ? 0 : -1;
+      if (items.length === 0) {
+        resultsEl.innerHTML = `<div class="search-empty">无匹配，请检查代码或名称</div>`;
+        resultsEl.hidden = false;
+        return;
+      }
+      resultsEl.innerHTML = items
+        .map(
+          (it, i) => `
+        <div class="search-item${i === activeIdx ? " active" : ""}" data-idx="${i}">
+          <span class="pill">${it.exchange}</span>
+          <b>${it.name}</b>
+          <span class="muted">${it.symbol}</span>
+        </div>
+      `
+        )
+        .join("");
+      resultsEl.hidden = false;
+      resultsEl.querySelectorAll(".search-item").forEach((el) => {
+        el.addEventListener("mousedown", (e) => {
+          e.preventDefault(); // 防 input blur 先于 click
+          const idx = parseInt(el.dataset.idx, 10);
+          selectStock(currentResults[idx]);
+        });
+      });
+    }
+
+    async function doSearch(q) {
+      if (!q || q.length < 1) {
+        resultsEl.hidden = true;
+        currentResults = [];
+        return;
+      }
+      try {
+        const resp = await fetch(`/api/stocks/search?q=${encodeURIComponent(q)}&limit=10`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const j = await resp.json();
+        // 异步竞态保护：query 已经变了就丢弃这次结果
+        if (q !== lastQuery) return;
+        renderResults(j.results || []);
+      } catch (err) {
+        if (q !== lastQuery) return;
+        resultsEl.innerHTML = `<div class="search-empty">搜索出错：${err.message}</div>`;
+        resultsEl.hidden = false;
+      }
+    }
+
+    searchInput.addEventListener("input", () => {
+      clearSelection();
+      const q = searchInput.value.trim();
+      lastQuery = q;
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => doSearch(q), 200);
+    });
+
+    searchInput.addEventListener("keydown", (e) => {
+      if (resultsEl.hidden || currentResults.length === 0) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        activeIdx = Math.min(activeIdx + 1, currentResults.length - 1);
+        updateActive();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        activeIdx = Math.max(activeIdx - 1, 0);
+        updateActive();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (activeIdx >= 0 && currentResults[activeIdx]) {
+          selectStock(currentResults[activeIdx]);
+        }
+      }
+    });
+
+    function updateActive() {
+      resultsEl.querySelectorAll(".search-item").forEach((el, i) => {
+        el.classList.toggle("active", i === activeIdx);
+      });
+      // 滚动选中项到可见区域
+      const activeEl = resultsEl.querySelector(".search-item.active");
+      if (activeEl) activeEl.scrollIntoView({ block: "nearest" });
+    }
+
+    searchInput.addEventListener("blur", () => {
+      // 200ms 延迟，让 mousedown 选中先生效
+      setTimeout(() => (resultsEl.hidden = true), 200);
+    });
+    searchInput.addEventListener("focus", () => {
+      if (currentResults.length > 0) resultsEl.hidden = false;
+    });
+
+    form.querySelector('[data-act="cancel"]').addEventListener("click", closeModal);
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const symbol = form.querySelector('[name="symbol"]').value;
+      if (!symbol) {
+        showError(form, "请先从下拉列表中选中一只股票");
+        return;
+      }
+      const fd = new FormData(form);
+      const inputs = form.querySelectorAll("input");
+      submitBtn.disabled = true;
+      inputs.forEach((i) => (i.disabled = true));
+      submitBtn.textContent = "校验中…";
+      try {
+        const resp = await fetch("/api/watchlist", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            symbol: symbol,
+            name: fd.get("name"),
+            exchange: fd.get("exchange"),
+            shares: parseInt(fd.get("shares") || "0", 10) || 0,
+          }),
+        });
+        if (!resp.ok) {
+          const j = await resp.json().catch(() => ({}));
+          throw new Error(j.detail || `HTTP ${resp.status}`);
+        }
+        closeModal();
+        tick();
+      } catch (err) {
+        showError(form, err.message);
+        submitBtn.disabled = false;
+        inputs.forEach((i) => (i.disabled = false));
+        submitBtn.textContent = "添加";
+      }
+    });
+    setTimeout(() => searchInput.focus(), 50);
+  }
+
+  function openEditModal(row) {
+    openModal(`
+      <div class="modal-overlay">
+        <form class="modal-card modal-form" id="edit-form">
+          <div class="modal-title">编辑 ${row.name} (${row.symbol})</div>
+          <label>名称</label>
+          <input name="name" value="${row.name}" required autocomplete="off" />
+          <label>持仓股数</label>
+          <input name="shares" type="number" min="0" value="${row.shares || 0}" />
+          <div class="modal-hint">代码与交易所不能修改。如要换股请删除后重新添加。</div>
+          <div class="modal-actions">
+            <button type="button" data-act="cancel">取消</button>
+            <button type="submit" class="primary" data-act="submit">保存</button>
+          </div>
+        </form>
+      </div>
+    `);
+    const form = document.getElementById("edit-form");
+    form.querySelector('[data-act="cancel"]').addEventListener("click", closeModal);
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const fd = new FormData(form);
+      const submitBtn = form.querySelector('[data-act="submit"]');
+      const inputs = form.querySelectorAll("input");
+      submitBtn.disabled = true;
+      inputs.forEach((i) => (i.disabled = true));
+      submitBtn.textContent = "保存中…";
+      try {
+        const resp = await fetch(`/api/watchlist/${row.symbol}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: fd.get("name").toString().trim(),
+            shares: parseInt(fd.get("shares") || "0", 10) || 0,
+          }),
+        });
+        if (!resp.ok) {
+          const j = await resp.json().catch(() => ({}));
+          throw new Error(j.detail || `HTTP ${resp.status}`);
+        }
+        closeModal();
+        tick();
+      } catch (err) {
+        showError(form, err.message);
+        submitBtn.disabled = false;
+        inputs.forEach((i) => (i.disabled = false));
+        submitBtn.textContent = "保存";
+      }
+    });
+  }
+
+  function openDeleteModal(row) {
+    openModal(`
+      <div class="modal-overlay">
+        <form class="modal-card modal-form" id="delete-form">
+          <div class="modal-title">删除 ${row.name} (${row.symbol}) ?</div>
+          <div class="modal-hint">
+            将从 watchlist 移除并清掉相关缓存（日 K / 分红 / 历史分位）。
+            重新添加同 symbol 时需重新拉取历史数据。
+          </div>
+          <div class="modal-actions">
+            <button type="button" data-act="cancel">取消</button>
+            <button type="submit" class="danger" data-act="submit">删除</button>
+          </div>
+        </form>
+      </div>
+    `);
+    const form = document.getElementById("delete-form");
+    form.querySelector('[data-act="cancel"]').addEventListener("click", closeModal);
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const submitBtn = form.querySelector('[data-act="submit"]');
+      submitBtn.disabled = true;
+      submitBtn.textContent = "删除中…";
+      try {
+        const resp = await fetch(`/api/watchlist/${row.symbol}`, { method: "DELETE" });
+        if (!resp.ok) {
+          const j = await resp.json().catch(() => ({}));
+          throw new Error(j.detail || `HTTP ${resp.status}`);
+        }
+        closeModal();
+        // 删除后立即从 DOM 移除卡片，下次 tick 主表自然不再返回
+        const card = document.getElementById(`c-${row.symbol}`);
+        if (card) card.remove();
+        tick();
+      } catch (err) {
+        showError(form, err.message);
+        submitBtn.disabled = false;
+        submitBtn.textContent = "删除";
+      }
+    });
+  }
 })();

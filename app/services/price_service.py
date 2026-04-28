@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
 
 from app.cache import MemoryTTLCache
 from app.data_sources.base import PriceSource
 from app.models import Quote, Stock
+
+if TYPE_CHECKING:
+    from app.config import AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +37,23 @@ class PriceService:
         source: PriceSource,
         ttl_seconds: float = _PRICE_TTL_SECONDS,
         watchlist: list[Stock] | None = None,
+        config: "AppConfig | None" = None,
     ) -> None:
         self.source = source
         self.cache: MemoryTTLCache = MemoryTTLCache(ttl_seconds)
         # 每个 symbol 最近一次成功获取的 quote。整批失败/单只缺失时回填。
         self._last_good: dict[str, Quote] = {}
-        # 完整 watchlist；当调用方只传子集时，发请求扩展到这里，避免缓存被 1-only 污染。
-        self._watchlist: list[Stock] = list(watchlist) if watchlist else []
+        # 运行时优先读 config.stocks（前端编辑 watchlist 时立即可见）；
+        # 测试 / 老调用走 watchlist 静态拷贝。
+        self._config = config
+        self._static_watchlist: list[Stock] = list(watchlist) if watchlist else []
+
+    @property
+    def _watchlist(self) -> list[Stock]:
+        """完整 watchlist；用于把任意子集调用扩展到全集，避免缓存被 1-only 污染。"""
+        if self._config is not None:
+            return self._config.stocks
+        return self._static_watchlist
 
     def get_quotes(self, stocks: list[Stock]) -> dict[str, Quote]:
         cached = self.cache.get(_BATCH_KEY)

@@ -10,6 +10,10 @@ class Stock:
     name: str
     exchange: str
     shares: int = 0   # 持仓数量（股）；0 表示未持仓，仅观察用
+    # 预期每年派息次数。> 0 时覆盖 drop_incomplete_latest_year 的"历史 max 推断"，
+    # 用于股票刚改派息节奏（如招行 2025 起从年报 1 次改为年报+中期 2 次）的过渡年。
+    # 0 表示不指定，仍用历史最大次数推断。
+    expected_payments_per_year: int = 0
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,9 @@ class YieldRow:
     annual_valuation: str | None = None
     # TTM 股息率（过去 365 天滚动窗口实际除权 ÷ 实时价）—— 与详情/图表一致
     yield_ttm_pct: float | None = None
+    # True 表示派息年合计 > 历史中位数 × 1.5（含特别股利或节奏过渡），
+    # 卡片上的"年化"标签会变橙提示用户这不是常态化数字。
+    annual_unusually_high: bool = False
     # price 的真实获取时间。stale-on-failure 时仍是上次成功的时刻；
     # 前端据此判断价格是否陈旧（updated_at - price_ts > 1.5 × refresh）。
     price_ts: datetime | None = None

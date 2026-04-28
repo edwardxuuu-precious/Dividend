@@ -159,6 +159,15 @@ def test_summarize_lapsed_currently_lapsed():
     assert summary["days_since_last_ex"] == 717
     assert summary["historical_lapsed_count"] == 1
     assert summary["stale_threshold_days"] == 540
+    # ongoing 段：start = lapsed 起点，end = series 末日，prev_ex 即触发，无 resumed
+    segments = summary["segments"]
+    assert len(segments) == 1
+    seg = segments[0]
+    assert seg["ongoing"] is True
+    assert seg["start_date"] == "2026-01-01"
+    assert seg["end_date"] == "2026-01-01"
+    assert seg["prev_ex_date"] == "2024-01-15"
+    assert seg["resumed_ex_date"] is None
 
 
 def test_summarize_lapsed_history_only():
@@ -176,6 +185,38 @@ def test_summarize_lapsed_history_only():
     summary = summarize_lapsed(series, events)
     assert summary["currently_lapsed"] is False
     assert summary["historical_lapsed_count"] == 1
+    seg = summary["segments"][0]
+    assert seg["ongoing"] is False
+    assert seg["start_date"] == "2023-12-01"
+    assert seg["end_date"] == "2023-12-01"
+    assert seg["prev_ex_date"] == "2022-01-15"
+    assert seg["resumed_ex_date"] == "2024-06-01"
+
+
+def test_summarize_lapsed_multiple_segments():
+    """多段独立 lapsed：每段都应单独列出 prev/resumed ex_date。"""
+    events = [
+        DividendEvent(ex_date="2010-05-01", cash_per_share=1.0),
+        DividendEvent(ex_date="2013-06-01", cash_per_share=1.0),  # 与上次间隔 1127 天 > 540
+        DividendEvent(ex_date="2015-07-01", cash_per_share=1.0),  # 与上次间隔 760 天 > 540
+    ]
+    bars = [
+        DailyBar(date="2010-08-01", close=100.0),  # window
+        DailyBar(date="2012-06-01", close=100.0),  # lapsed (距 2010-05-01 > 540)
+        DailyBar(date="2013-06-01", close=100.0),  # window 恢复
+        DailyBar(date="2014-12-01", close=100.0),  # lapsed (距 2013-06-01 > 540)
+        DailyBar(date="2015-07-01", close=100.0),  # window 恢复
+    ]
+    series = compute_ttm_series(bars, events)
+    summary = summarize_lapsed(series, events)
+    assert summary["historical_lapsed_count"] == 2
+    segs = summary["segments"]
+    assert segs[0]["prev_ex_date"] == "2010-05-01"
+    assert segs[0]["resumed_ex_date"] == "2013-06-01"
+    assert segs[0]["ongoing"] is False
+    assert segs[1]["prev_ex_date"] == "2013-06-01"
+    assert segs[1]["resumed_ex_date"] == "2015-07-01"
+    assert segs[1]["ongoing"] is False
 
 
 # ---------------- 增量日 K 缓存 ----------------

@@ -10,6 +10,7 @@
   <header>
     <h1>A 股分红率监控</h1>
     <div class="meta">
+      <button id="add-stock-btn" type="button" class="meta-link" title="添加新股票到 watchlist">+ 添加</button>
       <a href="/api/yields.csv" download class="meta-link" title="导出当前快照为 CSV">CSV</a>
       <a href="/api/report.pdf" download class="meta-link" title="生成 PDF 报告">PDF</a>
       <button id="notify-toggle" type="button" class="meta-link notify-btn" data-icon="🔔" title="P 分位 ≥ 90 时桌面通知">通知 关</button>
@@ -61,6 +62,8 @@
     <b>TTM</b> = 过去 365 天实际除权金额 / 实时价（详情/图表）。
     <b>P 分位</b>分别基于两套口径的历史样本计算，徽章一一对应。 · 数据源：akshare
   </footer>
+
+  <div id="modal-root"></div>
 
   <script src="/static/app.js"></script>
 </body>

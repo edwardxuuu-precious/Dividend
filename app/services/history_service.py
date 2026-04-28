@@ -3,13 +3,14 @@ from __future__ import annotations
 import bisect
 import logging
 import statistics
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from app.cache import FileCache
 from app.data_sources.base import HistoricalPriceSource
 from app.models import DailyBar, DividendEvent, Stock
 from app.services.dividend_service import (
     DividendService,
+    earliest_ex_date_in_year,
     annual_payment_groups,
     drop_incomplete_latest_year,
 )
@@ -22,7 +23,7 @@ _STATIC_TTL_SECONDS = 6 * 3600   # 静态部分（series/分位/年度/预估）
 _TTM_DAYS = 365
 _CARRY_STALE_DAYS = 540   # 距上次除权 > 此天数仍无新分红 → 视为已停止分红（lapsed）
 _INCREMENTAL_MAX_STALE_DAYS = 30  # stale 超过此天数走全量重拉，避免一次性补几个月数据时的边界 bug
-_STATIC_CACHE_NAME = "history_static_v6_cache"  # v6：新增 annual_percentiles 字段（年化口径分位）
+_STATIC_CACHE_NAME = "history_static_v9_cache"  # v9：lapsed_summary 增加 segments 列表（每段起止+触发/恢复 ex_date），旧 v8 缓存自然失效
 
 # series 每条记录第 5 列 source 的取值
 SOURCE_WINDOW = "window"        # 365 天窗口里有真实分红数据
@@ -149,9 +150,10 @@ class HistoryService:
 
         bars = self._get_bars(stock)
         events = self.dividend_service.get_events(stock)
+        expected = stock.expected_payments_per_year
         series = compute_ttm_series(bars, events, carry_stale_days=self.carry_stale_days)
-        annual_series = compute_annual_yield_series(bars, events)
-        annual = compute_annual_history(events)
+        annual_series = compute_annual_yield_series(bars, events, expected_count=expected)
+        annual = compute_annual_history(events, expected_count=expected)
         forecast = forecast_next_year(annual)
         percentiles = compute_percentiles(series)
         annual_percentiles = compute_annual_percentiles(annual_series)
@@ -410,6 +412,8 @@ def compute_ttm_series(
 def compute_annual_yield_series(
     bars: list[DailyBar],
     events: list[DividendEvent],
+    *,
+    expected_count: int = 0,
 ) -> list[list]:
     """
     按"最近完整派息自然年"口径逐日给出年化股息率，与首页卡片同口径：
@@ -436,6 +440,7 @@ def compute_annual_yield_series(
 
     series: list[list] = []
     by_year_so_far: dict[int, list[float]] = {}
+    earliest_ex_per_year: dict[int, date] = {}
     j = 0
     for bar in bars_sorted:
         try:
@@ -446,12 +451,20 @@ def compute_annual_yield_series(
         while j < len(parsed_events) and parsed_events[j][0] <= t:
             ex_date, cash = parsed_events[j]
             by_year_so_far.setdefault(ex_date.year, []).append(cash)
+            # events_sorted 已按 ex_date 升序，每年首次出现即最早除权日
+            earliest_ex_per_year.setdefault(ex_date.year, ex_date)
             j += 1
 
         if not by_year_so_far:
             series.append([bar.date, round(bar.close, 4), 0.0, 0.0, None])
             continue
-        filtered = drop_incomplete_latest_year(by_year_so_far)
+        latest_year_so_far = max(by_year_so_far)
+        filtered = drop_incomplete_latest_year(
+            by_year_so_far,
+            latest_first_ex_date=earliest_ex_per_year.get(latest_year_so_far),
+            today=t,
+            expected_count=expected_count,
+        )
         if not filtered:
             series.append([bar.date, round(bar.close, 4), 0.0, None, None])
             continue
@@ -480,6 +493,9 @@ def summarize_lapsed(
       days_since_last_ex     —— EOD 距最近一次除权多少天
       last_ex_date           —— 最近一次除权日（YYYY-MM-DD）
       historical_lapsed_count —— 历史出现过几段独立的 lapsed 段（连续 lapsed 算一段）
+      segments               —— 每段独立 lapsed 的明细列表，按开始时间升序：
+                                start_date / end_date / days / prev_ex_date / resumed_ex_date / ongoing
+                                供前端可点开徽章查看"每段断流的具体年份、跨度、原因"
 
     无任何分红事件时返回 None（pre_first 全程不构成警报）。
     """
@@ -489,18 +505,61 @@ def summarize_lapsed(
         return None
 
     last_ex_date = max(e.ex_date for e in events)
+    sorted_ex_dates = sorted(e.ex_date for e in events)
+
+    def _prev_ex_date(start_date: str) -> str | None:
+        # 该 lapsed 段开始前最近一次除权 = 触发 540 天计时的那笔
+        idx = bisect.bisect_right(sorted_ex_dates, start_date) - 1
+        return sorted_ex_dates[idx] if idx >= 0 else None
+
+    def _resumed_ex_date(end_date: str) -> str | None:
+        # 该 lapsed 段结束后最近一次除权 = 让 series 重新落入 window 的那笔
+        idx = bisect.bisect_right(sorted_ex_dates, end_date)
+        return sorted_ex_dates[idx] if idx < len(sorted_ex_dates) else None
+
+    def _span_days(start_date: str, end_date: str) -> int | None:
+        try:
+            s = datetime.strptime(start_date, "%Y-%m-%d").date()
+            e = datetime.strptime(end_date, "%Y-%m-%d").date()
+            return (e - s).days
+        except ValueError:
+            return None
 
     # 数 lapsed 段：连续 lapsed 算一段，状态切换才计数
-    historical_count = 0
-    prev_was_lapsed = False
+    segments: list[dict] = []
+    cur_start: str | None = None
+    cur_end: str | None = None
     for p in series:
+        date_str = p[0]
         src = p[4] if len(p) >= 5 else SOURCE_WINDOW
         if src == SOURCE_LAPSED:
-            if not prev_was_lapsed:
-                historical_count += 1
-                prev_was_lapsed = True
-        else:
-            prev_was_lapsed = False
+            if cur_start is None:
+                cur_start = date_str
+            cur_end = date_str
+        elif cur_start is not None:
+            segments.append(
+                {
+                    "start_date": cur_start,
+                    "end_date": cur_end,
+                    "days": _span_days(cur_start, cur_end),
+                    "prev_ex_date": _prev_ex_date(cur_start),
+                    "resumed_ex_date": _resumed_ex_date(cur_end),
+                    "ongoing": False,
+                }
+            )
+            cur_start = None
+            cur_end = None
+    if cur_start is not None:
+        segments.append(
+            {
+                "start_date": cur_start,
+                "end_date": cur_end,
+                "days": _span_days(cur_start, cur_end),
+                "prev_ex_date": _prev_ex_date(cur_start),
+                "resumed_ex_date": None,
+                "ongoing": True,
+            }
+        )
 
     eod_date_str, _, _, _, eod_src = series[-1]
     try:
@@ -514,8 +573,9 @@ def summarize_lapsed(
         "currently_lapsed": eod_src == SOURCE_LAPSED,
         "days_since_last_ex": days_since_last_ex,
         "last_ex_date": last_ex_date,
-        "historical_lapsed_count": historical_count,
+        "historical_lapsed_count": len(segments),
         "stale_threshold_days": carry_stale_days,
+        "segments": segments,
     }
 
 
@@ -663,15 +723,29 @@ def valuation_label(rank: float | None) -> str | None:
 # ---------------- 年度分红 + 预估 ----------------
 
 
-def compute_annual_history(events: list[DividendEvent]) -> list[dict]:
+def compute_annual_history(
+    events: list[DividendEvent],
+    *,
+    expected_count: int = 0,
+) -> list[dict]:
     """
     按除权年份聚合每股现金分红，返回升序列表（每年一条）。
     {year, total, yoy_pct}  yoy_pct 是相对前一年的增长百分比，可能为 None（首年）。
 
     会剔除"看起来还在进行中"的最新年（见 drop_incomplete_latest_year）。
     这样年度表 + 预估都不会被半年度中期分红误导。
+    expected_count > 0 时透传给 drop_incomplete_latest_year 作为人工 override。
     """
-    by_year = drop_incomplete_latest_year(annual_payment_groups(events))
+    raw_by_year = annual_payment_groups(events)
+    earliest_ex = (
+        earliest_ex_date_in_year(events, max(raw_by_year)) if raw_by_year else None
+    )
+    by_year = drop_incomplete_latest_year(
+        raw_by_year,
+        latest_first_ex_date=earliest_ex,
+        today=date.today(),
+        expected_count=expected_count,
+    )
     out: list[dict] = []
     prev = None
     for y in sorted(by_year):

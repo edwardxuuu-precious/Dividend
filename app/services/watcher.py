@@ -38,10 +38,10 @@ class WatcherService:
         stocks = self.config.stocks
         if len(stocks) > 1:
             with ThreadPoolExecutor(max_workers=min(_MAX_WORKERS, len(stocks))) as ex:
-                annuals_list = list(ex.map(self.dividend_service.get_latest_annual, stocks))
+                analyses_list = list(ex.map(self.dividend_service.analyze_latest_annual, stocks))
         else:
-            annuals_list = [self.dividend_service.get_latest_annual(s) for s in stocks]
-        annuals = dict(zip([s.symbol for s in stocks], annuals_list))
+            analyses_list = [self.dividend_service.analyze_latest_annual(s) for s in stocks]
+        analyses = dict(zip([s.symbol for s in stocks], analyses_list))
 
         # P 分位 + 估值标签：仅读静态缓存，未就绪时为 None。
         # live_price 直接复用上面 quotes dict 里的价，避免 percentile_only 内部再发起
@@ -59,7 +59,9 @@ class WatcherService:
         rows: list[YieldRow] = []
         for stock in stocks:
             quote = quotes.get(stock.symbol)
-            annual = annuals.get(stock.symbol)
+            analysis = analyses.get(stock.symbol)
+            annual = analysis.annual if analysis else None
+            unusually_high = bool(analysis.unusually_high) if analysis else False
 
             price = quote.price if quote else None
             dividend = annual.cash_per_share if annual else None
@@ -108,6 +110,7 @@ class WatcherService:
                     shares=stock.shares,
                     position_value=position_value,
                     annual_cash=annual_cash,
+                    annual_unusually_high=unusually_high,
                 )
             )
         return rows
